@@ -1,0 +1,25 @@
+# ROS 2 workspace build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Colcon / ament
+COLCON_IGNORE
+AMENT_IGNORE

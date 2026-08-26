@@ -1,0 +1,64 @@
+openarm_gravity_pd_node:
+  ros__parameters:
+    # ── CAN 接口分配 ───────────────────────────────────────────────────────
+    # can0 = 右臂，can1 = 左臂
+    right_arm_can: "can0"
+    left_arm_can:  "can1"
+
+    # ── URDF 路径 ─────────────────────────────────────────────────────────
+    # 启动时由 openarm_description/urdf/robot/v10.urdf.xacro 生成
+    # launch 文件会自动覆盖此值
+    urdf_path: ""
+
+    # ── 关节限位 yaml ─────────────────────────────────────────────────────
+    # openarm_description/config/arm/v10/joint_limits.yaml — 与 URDF/MoveIt
+    # 使用同一文件。launch 文件会用解析后的路径覆盖此值。
+    # 各臂软限位由其按 xacro 的 offset/reflect 推导得出。
+    joint_limits_path: ""
+
+    # ── 重力补偿比例 ───────────────────────────────────────────────────────
+    # 0.95 略欠补偿；当 URDF 模型质量略高于实际硬件时，可防止向上漂移
+    grav_scale: 0.95
+
+    # ── 手臂关节 1–7 的 PD 增益 ───────────────────────────────────────────
+    # MIT 框架：τ = Kp*(q_des − q_act) + Kd*(0 − dq_act) + τ_gravity
+    #
+    # 关节布局：
+    #   J1/J2 : 肩部（DM8009，大扭矩）
+    #   J3/J4 : 肘部（DM4340）
+    #   J5–J7 : 腕部（DM4310，小扭矩）
+    #
+    # 减小 Kp/Kd 可使运动更柔顺、更顺从
+    # 增大则跟踪更刚硬、更精确
+    # kp: [50.0, 50.0, 50.0, 40.0, 8.0, 8.0, 8.0]
+    kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0]
+    kd: [ 2.2,  2.2,  1.4,  1.4, 0.4, 0.4, 0.4]
+
+    # 每条臂独立 CAN 控制线程的频率 [Hz]
+    control_rate: 500.0
+
+    # 相邻两次 joint_command 之间的关节线性插值时长 [s]
+    # 对齐上游 IK（默认 50 Hz → 0.02）；设 0 关闭插值
+    command_interp_s: 0.02
+
+    # 目标最大变化速率 [rad/s]，关节 1–7
+    # 降低可减少遥操作跳变，但会增加跟踪延迟
+    max_joint_vel: [2.6, 2.6, 3.0, 3.0, 5.5, 5.5, 5.5]
+
+    # ── 夹爪 PD 增益 ──────────────────────────────────────────────────────
+    gripper_kp: 5.0
+    gripper_kd: 1.0
+
+    log_interval:  0.0     # 接收日志周期 [s]；<=0 关闭（默认不打印，避免卡控制环）
+
+    # ── JointState 反馈发布 ────────────────────────────────────────────────
+    publish_joint_states: true
+    joint_states_rate: 100.0
+
+    # ── 夹爪物理行程限位 [rad] ────────────────────────────────────────────
+    # 电机方向约定（与 openarm_hardware v10_simple_hardware 一致）：
+    #   闭合位置：0.0 rad     （finger_joint = 0.000 m）
+    #   张开位置：-1.0472 rad （finger_joint = 0.044 m，约 -60°，-π/3）
+    # gripper_max_rad 为负值，因为张开对应电机负方向
+    # 归一化输入：0.0=闭合 → 0.0 rad，1.0=张开 → gripper_max_rad
+    gripper_max_rad: -1.0472

@@ -1,0 +1,64 @@
+# Caches & tools
+.ruff_cache/
+.uv-cache/
+.uv-tools/
+.test-calibration/
+.cache/
+.mypy_cache/
+.pytest_cache/
+
+# Python envs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ROS 2 build artifacts
+build/
+install/
+log/
+ros2_robot/build/
+ros2_robot/install/
+ros2_robot/log/
+
+# Large binary installers (keep out of git)
+*.deb
+*.apk
+
+# Runtime / local outputs
+outputs/
+datasets/
+data/
+recordings/
+checkpoints/
+*.log
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+*token*.json
+
+# Camera captures and large local media
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.avi
+*.mkv
+*.npy
+*.npz
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+ros2_arms/.git.bak_ros2_arms_remote/

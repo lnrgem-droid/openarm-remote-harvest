@@ -1,0 +1,343 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "robot_bridge/frames.schema.json",
+  "title": "robot_bridge WebSocket 帧",
+  "description": "外部算法 <-> robot_bridge 之间所有 JSON 帧的唯一事实来源。每条 WS 消息是一个 JSON 对象，按 type 分派到下面某个 $defs。",
+
+  "oneOf": [
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/state" },
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/error" }
+  ],
+
+  "$defs": {
+    "seq": { "type": "integer", "description": "发送方自增序号" },
+    "time": { "type": "number", "description": "Unix 时间戳（秒），下行帧自动填充" },
+    "joint7": {
+      "type": "array", "items": { "type": "number" }, "minItems": 7, "maxItems": 7,
+      "description": "7 个关节值 (rad)，顺序 joint1..joint7"
+    },
+    "gripper_norm": { "type": "number", "minimum": 0, "maximum": 1, "description": "夹爪归一化 0 闭合 / 1 打开" },
+    "point": {
+      "type": "object", "description": "位置 (m)",
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }
+    },
+    "quaternion": {
+      "type": "object", "description": "姿态四元数",
+      "properties": {
+        "x": { "type": "number" }, "y": { "type": "number" },
+        "z": { "type": "number" }, "w": { "type": "number" }
+      }
+    },
+
+    "command": {
+      "type": "object",
+      "description": "外 -> 桥：运动控制。无同步应答；未知 target 静默忽略。",
+      "required": ["type", "target"],
+      "properties": {
+        "type": { "const": "command" },
+        "seq": { "$ref": "#/$defs/seq" },
+        "time": { "$ref": "#/$defs/time" },
+        "target": {
+          "type": "string",
+          "enum": ["chassis", "chassis_state", "arm_pd", "arm_traj", "gripper", "lift", "waist", "arm_cartesian"]
+        },
+        "ttl_ms": { "type": "number", "description": "仅 arm_pd 有效，超时停止重发" },
+        "data": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "target": { "const": "chassis" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "底盘速度，robot_bridge 限幅后发布 geometry_msgs/Twist",
+                "required": ["vx", "vy", "wz"],
+                "properties": {
+                  "vx": { "type": "number", "description": "前后线速度 (m/s)" },
+                  "vy": { "type": "number", "description": "左右线速度 (m/s)" },
+                  "wz": { "type": "number", "description": "偏航角速度 (rad/s)" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "chassis_state" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "底盘状态控制，发布到 /chassis/state_cmd",
+                "required": ["command"],
+                "properties": {
+                  "command": { "type": "string", "enum": ["enable", "disable", "brake"] }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "arm_pd" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "gravity_pd 模式：写缓存 100Hz ZOH 重发",
+                "properties": {
+                  "left": { "$ref": "#/$defs/joint7" },
+                  "right": { "$ref": "#/$defs/joint7" },
+                  "left_gripper": { "$ref": "#/$defs/gripper_norm" },
+                  "right_gripper": { "$ref": "#/$defs/gripper_norm" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "arm_traj" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "trajectory 模式：FollowJointTrajectory 单点",
+                "properties": {
+                  "left": { "$ref": "#/$defs/joint7" },
+                  "right": { "$ref": "#/$defs/joint7" },
+                  "left_velocity": { "$ref": "#/$defs/joint7" },
+                  "right_velocity": { "$ref": "#/$defs/joint7" },
+                  "duration": { "type": "number", "description": "到达目标时长 (s)，默认 2.0" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "gripper" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "trajectory 模式夹爪",
+                "properties": {
+                  "left": { "$ref": "#/$defs/gripper_norm" },
+                  "right": { "$ref": "#/$defs/gripper_norm" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "lift" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "升降；position 与 velocity 可单独或同时给",
+                "properties": {
+                  "position": { "type": "number", "description": "绝对位置 (mm) 0~400" },
+                  "velocity": { "type": "number", "description": "速度 (mm/s) 0~120" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "waist" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "含 torque/velocity 走 [pos,vel,torque] 复合，否则仅 position",
+                "properties": {
+                  "position": { "type": "number", "description": "位置 (rad)" },
+                  "velocity": { "type": "number", "description": "速度 (rad/s)" },
+                  "torque": { "type": "number", "description": "力矩 (N·m)" }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "target": { "const": "arm_cartesian" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "cartesian 模式：转发 /move_pose action",
+                "required": ["arm"],
+                "properties": {
+                  "arm": { "type": "string", "enum": ["left", "right"] },
+                  "position": { "$ref": "#/$defs/point" },
+                  "orientation": { "$ref": "#/$defs/quaternion" },
+                  "vel_scale": { "type": "number" },
+                  "acc_scale": { "type": "number" },
+                  "plan_only": { "type": "boolean" },
+                  "frame_id": { "type": "string", "description": "空 = world" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "request": {
+      "type": "object",
+      "description": "外 -> 桥：生命周期。桥立即回 response(accepted)，真正结果走 event。",
+      "required": ["type", "action"],
+      "properties": {
+        "type": { "const": "request" },
+        "id": { "type": "string", "description": "请求 id，回填到 response/event 便于匹配" },
+        "seq": { "$ref": "#/$defs/seq" },
+        "time": { "$ref": "#/$defs/time" },
+        "action": { "type": "string", "enum": ["startup", "emergency_stop", "reset"] },
+        "data": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "const": "startup" } } },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "arm_mode": { "type": "string", "enum": ["trajectory", "gravity_pd", "cartesian"] },
+                  "components": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["arms", "chassis", "lift", "waist", "emergency_stop"] }
+                  },
+                  "show_terminal": { "type": "boolean" },
+                  "ready_timeout_sec": { "type": "number" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "response": {
+      "type": "object",
+      "description": "桥 -> 外：request 的同步受理应答。",
+      "required": ["type", "ok"],
+      "properties": {
+        "type": { "const": "response" },
+        "time": { "$ref": "#/$defs/time" },
+        "id": { "type": ["string", "null"] },
+        "seq": { "type": ["integer", "null"] },
+        "action": { "type": ["string", "null"] },
+        "ok": { "type": "boolean" },
+        "message": { "type": "string" },
+        "data": { "type": "object" }
+      }
+    },
+
+    "state": {
+      "type": "object",
+      "description": "桥 -> 外：周期状态快照（约 state_rate Hz）。",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "state" },
+        "seq": { "$ref": "#/$defs/seq" },
+        "time": { "$ref": "#/$defs/time" },
+        "data": {
+          "type": "object",
+          "properties": {
+            "arm_mode": { "type": "string" },
+            "left_arm": { "$ref": "#/$defs/armState" },
+            "right_arm": { "$ref": "#/$defs/armState" },
+            "chassis": {
+              "type": "object",
+              "properties": {
+                "battery_voltage_v": { "type": "number" },
+                "battery_temp1_c": { "type": "number" },
+                "battery_temp2_c": { "type": "number" },
+                "battery_soc": { "type": "integer" },
+                "battery_fault": { "type": "integer" },
+                "chassis_state": { "type": "integer" },
+                "state_name": { "type": "string" },
+                "hub_faults": { "type": "array", "items": { "type": "integer" } },
+                "steer_faults": { "type": "array", "items": { "type": "integer" } },
+                "vx": { "type": "number" },
+                "vy": { "type": "number" },
+                "wz": { "type": "number" }
+              }
+            },
+            "lift": { "type": "object" },
+            "waist": {
+              "type": "object",
+              "properties": {
+                "position": { "type": "number" },
+                "velocity": { "type": "number" },
+                "torque": { "type": "number" }
+              }
+            },
+            "ee_poses": {
+              "type": "object",
+              "properties": {
+                "left": { "$ref": "#/$defs/pose" },
+                "right": { "$ref": "#/$defs/pose" }
+              }
+            },
+            "teleop_action": { "type": "object", "description": "VR/IK 动作快照，valid 表示是否新鲜有效" }
+          }
+        }
+      }
+    },
+    "armState": {
+      "type": "object",
+      "properties": {
+        "position": { "type": "array", "items": { "type": "number" } },
+        "velocity": { "type": "array", "items": { "type": "number" } },
+        "effort": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "pose": {
+      "type": "object",
+      "properties": {
+        "position": { "$ref": "#/$defs/point" },
+        "orientation": { "$ref": "#/$defs/quaternion" }
+      }
+    },
+
+    "event": {
+      "type": "object",
+      "description": "桥 -> 外：异步事件结果。",
+      "required": ["type", "event"],
+      "properties": {
+        "type": { "const": "event" },
+        "time": { "$ref": "#/$defs/time" },
+        "id": { "type": ["string", "null"] },
+        "event": {
+          "type": "string",
+          "enum": ["startup_completed", "startup_failed", "emergency_stop",
+                   "reset_completed", "move_pose_result"]
+        },
+        "data": { "type": "object" }
+      }
+    },
+
+    "error": {
+      "type": "object",
+      "description": "桥 -> 外：协议或参数错误。",
+      "required": ["type", "code", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "time": { "$ref": "#/$defs/time" },
+        "id": { "type": ["string", "null"] },
+        "seq": { "type": ["integer", "null"] },
+        "code": {
+          "type": "string",
+          "enum": ["BAD_FRAME", "BAD_TYPE", "BAD_ACTION", "BAD_ARG",
+                   "SHUTTING_DOWN", "HANDLER_ERROR", "ERROR"]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}
