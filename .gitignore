@@ -27,11 +27,11 @@ ros2_robot/log/
 *.apk
 
 # Runtime / local outputs
-outputs/
-datasets/
-data/
-recordings/
-checkpoints/
+/outputs/
+/datasets/
+/data/
+/recordings/
+/checkpoints/
 *.log
 
 # Local configuration and credentials
@@ -45,16 +45,6 @@ checkpoints/
 credentials.json
 secrets.json
 *token*.json
-
-# Camera captures and large local media
-*.bag
-*.db3
-*.mcap
-*.mp4
-*.avi
-*.mkv
-*.npy
-*.npz
 
 # IDE / OS
 .idea/
