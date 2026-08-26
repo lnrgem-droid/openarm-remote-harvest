@@ -24,6 +24,8 @@
 | `LeRobot_OpenArm_启动指南.md` | 当前本机的启动与采集操作记录 |
 | `docs/BASELINE.md` | 本次备份范围、环境和回退说明 |
 | `docs/GITHUB_BACKUP.md` | GitHub 建仓、推送和后续协作命令 |
+| `docs/RESTORE_AND_TELEOP.md` | 从全新克隆恢复、编译并启动双臂主从遥操作 |
+| `docs/VALIDATION_2026-08-26.md` | 本次 bundle、编译、假硬件和真机验证记录 |
 
 ## 当前运行基线
 
@@ -32,6 +34,7 @@
 - LeRobot 源码版本：0.6.2
 - 当前双边遥操作 CAN 默认映射：右从臂 `can0`、左从臂 `can1`、右主臂 `can2`、左主臂 `can3`
 - `openarm_bringup`、`openarm_gravity_pd_control` 和直接占用相同 CAN 的遥操作程序不能同时运行
+- 2026-08-26 已从 Git bundle 全新恢复并完成双臂真机主从遥操作；左右夹爪均被识别并进入控制线程，实际开合尚未单独记录验证
 
 当前源码的具体编译和启动说明见：
 
@@ -46,11 +49,26 @@
 ```bash
 git clone <你的仓库地址> openarm-remote-harvest
 cd openarm-remote-harvest/ros2_robot
+
+# ROS Humble 使用系统 Python 3.10；不要在 Conda 环境中编译 ROS 工作空间
+conda deactivate 2>/dev/null || true
 source /opt/ros/humble/setup.bash
+
+# rosdep 尚未初始化的电脑只需执行一次：
+# sudo rosdep init
+# rosdep update
 rosdep install --from-paths src --ignore-src -r -y
-colcon build
+
+# 仓库内的 openarm_can 是普通 CMake 包，先单独构建并导出其配置路径
+colcon build --packages-select openarm_can
+openarm_can_cmake_dir="$PWD/install/openarm_can/lib/cmake/OpenArmCAN"
+colcon build --packages-skip openarm_can \
+  --cmake-args -DOpenArmCAN_DIR="$openarm_can_cmake_dir"
+
 source install/setup.bash
 ```
+
+如果系统已经安装 `libopenarm-can-dev` 并能找到 `OpenArmCANConfig.cmake`，也可以直接执行普通的 `colcon build`。上述两步源码构建方式已经在本次恢复验证中通过 11/11 个 ROS 包。
 
 LeRobot 和桥接插件建议安装到单独的 Conda 环境：
 
@@ -63,6 +81,8 @@ pip install "websockets>=12"
 ```
 
 恢复后不要直接给机械臂上使能。应先完成依赖检查、CAN 口核对、仿真/无负载测试和急停验证。
+
+真机主从遥操作请严格按 [恢复与主从遥操作手册](docs/RESTORE_AND_TELEOP.md) 执行。本程序启动时会使能四臂并将关节移动到预设初始位置；退出时会执行 `disable_all()`，必须提前支撑机械臂。
 
 ## 安全边界
 
@@ -79,4 +99,3 @@ Git 默认忽略 ROS 构建产物、虚拟环境、数据集、录像、模型�
 ## 许可证
 
 本仓库包含多个来源的组件。各组件继续遵循其目录内已有的许可证和版权声明；本次源码备份不额外改变或统一这些许可证。
-
