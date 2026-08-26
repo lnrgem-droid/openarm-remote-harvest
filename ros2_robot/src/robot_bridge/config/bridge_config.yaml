@@ -1,0 +1,112 @@
+# robot_bridge 集中配置
+#
+# 这份文件收敛了原本散落在 Python 里的所有“接口地址”和“可调参数”：
+# WebSocket 参数、底层 launch 命令、ROS 话题 / 服务 / Action 名、关节名、限位。
+
+#
+# 加载：bridge_node 启动时读 config_file 参数指向的本文件，
+#       与 config_loader.DEFAULTS 深合并（本文件缺省的项自动用默认值）。
+# 覆盖：host/port/control_rate/state_rate/command_ttl_ms/arm_mode 也可用
+#       launch 参数或命令行覆盖（launch 参数优先级最高）。
+
+# ========== WebSocket 服务 ==========
+server:
+  host: "0.0.0.0"            # 监听地址
+  port: 9000                # 监听端口
+  control_rate: 100.0       # arm_pd 内环 ZOH 重发频率 (Hz)
+  state_rate: 50.0          # 状态广播 / 一次性指令执行频率 (Hz)
+  command_ttl_ms: 100.0     # arm_pd 命令有效期，超时停止重发
+  default_arm_mode: trajectory   # 未显式 startup 时的默认双臂模式
+  validate_incoming: false  # true 时用 config/schemas/*.json 校验入站帧（需安装 jsonschema）
+
+# ========== 启动（startup 请求） ==========
+startup:
+  default_components: [arms, chassis, lift, waist, emergency_stop]  # startup 未指定 components 时的默认集合
+  ready_timeout_sec: 30.0   # 等待底层 ROS 接口 ready 的默认超时 (s)
+  log_dir: /tmp/robot_bridge_launch   # 后台 launch 的日志目录
+
+# ========== 底层 launch 命令 ==========
+launches:
+  # 每个双臂模式需要拉起的一组进程：[进程名, [命令...]]
+  # 进程名相同会自动去重复用（cartesian 与 trajectory 共用 arms）
+  arm_modes:
+    trajectory:
+      - [arms, [ros2, launch, openarm_bringup, openarm.bimanual.launch.py]]
+    gravity_pd:
+      - [arms, [ros2, launch, openarm_gravity_pd_control, openarm_gravity_pd_control.launch.py]]
+    cartesian:
+      - [arms, [ros2, launch, openarm_bringup, openarm.bimanual.launch.py]]
+      - [arms_move_group, [ros2, launch, openarm_bimanual_moveit_config, move_group.launch.py]]
+      - [arms_move_pose, [ros2, launch, openarm_move_pose, move_pose.launch.py]]
+  # 附属组件的 launch 命令
+  components:
+    chassis: [ros2, launch, chassis_control, chassis_control.launch.py]
+    lift: [ros2, launch, lift_motor_canopen, lift_motor.launch.py]
+    waist: [ros2, launch, openarm_waist_control, waist.launch.py]
+    emergency_stop: [ros2, launch, emergency_stop, emergency_stop.launch.py]
+
+# ========== 双臂关节与夹爪 ==========
+arms:
+  joint_count: 7
+  left_joints:  [openarm_left_joint1, openarm_left_joint2, openarm_left_joint3, openarm_left_joint4, openarm_left_joint5, openarm_left_joint6, openarm_left_joint7]
+  right_joints: [openarm_right_joint1, openarm_right_joint2, openarm_right_joint3, openarm_right_joint4, openarm_right_joint5, openarm_right_joint6, openarm_right_joint7]
+  left_gripper_joint: openarm_left_finger_joint1
+  right_gripper_joint: openarm_right_finger_joint1
+  gripper_open_m: 0.044     # 夹爪归一化 1.0 对应的开口 (m)
+
+# ========== 遥操作动作（teleop_action） ==========
+teleop:
+  action_size: 8            # 动作维度：7 臂关节 + 1 夹爪
+  timeout_sec: 0.25         # 超过该时间未更新则 teleop_action.valid=false
+
+# ========== 移动底盘 ==========
+chassis:
+  max_vx: 0.5               # 前后最大线速度 (m/s)
+  max_vy: 0.5               # 左右最大线速度 (m/s)
+  max_wz: 1.0               # 最大角速度 (rad/s)
+  command_timeout_sec: 0.5  # Web 控制中断后归零速度，和 PICO 遥操作一致
+
+# ========== /ee_poses child_frame_id -> 内部 left/right ==========
+ee_frames:
+  openarm_left_hand: left
+  openarm_right_hand: right
+
+# ========== ROS 话题 / 服务 / Action ==========
+topics:
+  qos_depth: 10
+  cmd_vel: /cmd_vel
+  chassis:
+    state_command: /chassis/state_cmd
+    status: /chassis/status
+  joint_states: /joint_states
+  ee_poses: /ee_poses
+  emergency_stop_trigger: /emergency_stop_node/trigger
+  move_pose_action: /move_pose
+  arm_pd_command:            # gravity_pd 模式：JointState 关节命令
+    left: /left_arm/joint_command
+    right: /right_arm/joint_command
+  arm_position_command:      # forward position 控制（笛卡尔 IK 结果也走这里）
+    left: /left_forward_position_controller/commands
+    right: /right_forward_position_controller/commands
+  gripper_action:            # GripperCommand action
+    left: /left_gripper_controller/gripper_cmd
+    right: /right_gripper_controller/gripper_cmd
+  trajectory_action:         # FollowJointTrajectory action
+    left: /left_joint_trajectory_controller/follow_joint_trajectory
+    right: /right_joint_trajectory_controller/follow_joint_trajectory
+  lift:
+    move_absolute: /motor/move_absolute
+    set_velocity: /motor/set_velocity
+    enable: /motor/enable
+    position: /motor/position
+    velocity: /motor/velocity
+    enabled: /motor/enabled
+    error: /motor/error
+    error_code: /motor/error_code
+    error_message: /motor/error_message
+    status: /motor/status
+  waist:
+    position_command: /waist_controller/position_command
+    command: /waist_controller/command
+    enable: /waist_controller/enable
+    state: /waist_controller/state

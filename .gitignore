@@ -1,0 +1,40 @@
+# Caches & tools
+.ruff_cache/
+.uv-cache/
+.uv-tools/
+.test-calibration/
+.cache/
+.mypy_cache/
+.pytest_cache/
+
+# Python envs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ROS 2 build artifacts
+build/
+install/
+log/
+ros2_robot/build/
+ros2_robot/install/
+ros2_robot/log/
+
+# Large binary installers (keep out of git)
+*.deb
+*.apk
+
+# Runtime / local outputs
+outputs/
+datasets/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.env
+ros2_arms/.git.bak_ros2_arms_remote/

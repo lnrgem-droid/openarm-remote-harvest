@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>openarm_gravity_pd_control</name>
+  <version>0.1.0</version>
+  <description>
+    Subscribes to exoskeleton left/right arm joint commands and drives the
+    physical OpenArm robot using gravity compensation + PD control via CAN.
+    can0 = right arm, can1 = left arm.
+  </description>
+  <maintainer email="dev@openarm.ai">OpenArm Developer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+
+  <!-- C++ dynamics / CAN dependencies -->
+  <build_depend>liborocos-kdl-dev</build_depend>
+  <build_depend>libeigen3-dev</build_depend>
+  <build_depend>liburdfdom-dev</build_depend>
+  <build_depend>libyaml-cpp-dev</build_depend>
+
+  <!-- ROS-wrapped packages -->
+  <depend>kdl_parser</depend>
+
+  <!-- Runtime: URDF generation via xacro at launch -->
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>openarm_description</exec_depend>
+  <exec_depend>libyaml-cpp0.7</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

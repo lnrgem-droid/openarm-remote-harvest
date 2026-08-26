@@ -1,0 +1,148 @@
+[08/26 20:38:43.426594][info][263888][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/26 20:38:43.426803][warning][263888][UsbEnumeratorLibusb.cpp:398] Failed to open USB device: error=Access denied (insufficient permissions). Try again
+[08/26 20:38:43.476988][warning][263888][UsbEnumeratorLibusb.cpp:407] Failed to open USB device (Access denied (insufficient permissions)), skipping, info.serial and infName may be empty
+[08/26 20:38:43.477082][warning][263888][UsbEnumeratorLibusb.cpp:398] Failed to open USB device: error=Access denied (insufficient permissions). Try again
+[08/26 20:38:43.527192][warning][263888][UsbEnumeratorLibusb.cpp:407] Failed to open USB device (Access denied (insufficient permissions)), skipping, info.serial and infName may be empty
+[08/26 20:38:43.527254][warning][263888][UsbEnumeratorLibusb.cpp:398] Failed to open USB device: error=Access denied (insufficient permissions). Try again
+[08/26 20:38:43.577345][warning][263888][UsbEnumeratorLibusb.cpp:407] Failed to open USB device (Access denied (insufficient permissions)), skipping, info.serial and infName may be empty
+[08/26 20:38:43.579940][info][263888][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[08/26 20:38:43.579963][info][263888][DeviceManager.cpp:25] Current found device(s): (3)
+[08/26 20:38:43.579967][info][263888][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: , Connection: USB3.2
+[08/26 20:38:43.579969][info][263888][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: , Connection: USB3.2
+[08/26 20:38:43.579970][info][263888][DeviceManager.cpp:34] 	- Name: Gemini 335L, PID: 0x0804, SN/ID: , Connection: USB3.2
+[08/26 20:38:43.579975][info][263888][DeviceManager.cpp:463] Enable net device enumeration: true
+[08/26 20:38:44.584648][info][263888][DeviceManager.cpp:25] Current device(s) list: (3)
+[08/26 20:38:44.584685][info][263888][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: , Connection: USB3.2
+[08/26 20:38:44.584687][info][263888][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: , Connection: USB3.2
+[08/26 20:38:44.584689][info][263888][DeviceManager.cpp:34] 	- Name: Gemini 335L, PID: 0x0804, SN/ID: , Connection: USB3.2
+[08/26 20:38:44.585198][warning][263888][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(537)
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: DEVICE_UNAVAILABLE
+ - status: 113
+[08/26 20:38:44.585345][warning][263888][UsbEnumeratorLibusb.cpp:462] Execute failure! A libobsensor_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(462):openUsbDevice
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 113
+[08/26 20:38:44.585390][warning][263888][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(537)
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: DEVICE_UNAVAILABLE
+ - status: 113
+[08/26 20:38:44.585415][warning][263888][UsbEnumeratorLibusb.cpp:462] Execute failure! A libobsensor_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(462):openUsbDevice
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 113
+[08/26 20:38:44.585426][warning][263888][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: LinuxUsbPal.cpp(317)
+ - msg: usbEnumerator openUsbDevice failed!
+ - type: DEVICE_UNAVAILABLE
+ - status: 113
+[08/26 20:38:44.585587][warning][263888][DeviceBase.cpp:374] Execute failure! A libobsensor_exception has occurred!
+ - where: DeviceBase.cpp(374):getComponent
+ - msg: usbEnumerator openUsbDevice failed!
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 113
+[08/26 20:38:44.585803][warning][263888][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(537)
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: DEVICE_UNAVAILABLE
+ - status: 113
+[08/26 20:38:44.585827][warning][263888][UsbEnumeratorLibusb.cpp:462] Execute failure! A libobsensor_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(462):openUsbDevice
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 113
+[08/26 20:38:44.585890][warning][263888][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(537)
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: DEVICE_UNAVAILABLE
+ - status: 113
+[08/26 20:38:44.585910][warning][263888][UsbEnumeratorLibusb.cpp:462] Execute failure! A libobsensor_exception has occurred!
+ - where: UsbEnumeratorLibusb.cpp(462):openUsbDevice
+ - msg: Open device failed: Access denied (insufficient permissions)
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 113
+[08/26 20:38:44.585919][warning][263888][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: LinuxUsbPal.cpp(317)
+ - msg: usbEnumerator openUsbDevice failed!
+ - type: DEVICE_UNAVAILABLE
+ - status: 113
+[08/26 20:38:44.585953][warning][263888][DeviceBase.cpp:374] Execute failure! A libobsensor_exception has occurred!
+ - where: DeviceBase.cpp(374):getComponent
+ - msg: usbEnumerator openUsbDevice failed!
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 113
+[08/26 20:39:30.660572][info][265048][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[08/26 20:39:31.000701][info][265048][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[08/26 20:39:31.000754][info][265048][DeviceManager.cpp:25] Current found device(s): (3)
+[08/26 20:39:31.000761][info][265048][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: CV2L360000NR, Connection: USB3.2
+[08/26 20:39:31.000765][info][265048][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: CV2L360000D9, Connection: USB3.2
+[08/26 20:39:31.000767][info][265048][DeviceManager.cpp:34] 	- Name: Gemini 335L, PID: 0x0804, SN/ID: CP3294Y0001E, Connection: USB3.2
+[08/26 20:39:31.000774][info][265048][DeviceManager.cpp:463] Enable net device enumeration: true
+[08/26 20:39:32.005346][info][265048][DeviceManager.cpp:25] Current device(s) list: (3)
+[08/26 20:39:32.005378][info][265048][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: CV2L360000NR, Connection: USB3.2
+[08/26 20:39:32.005381][info][265048][DeviceManager.cpp:34] 	- Name: Gemini 305, PID: 0x0840, SN/ID: CV2L360000D9, Connection: USB3.2
+[08/26 20:39:32.005384][info][265048][DeviceManager.cpp:34] 	- Name: Gemini 335L, PID: 0x0804, SN/ID: CP3294Y0001E, Connection: USB3.2
+[08/26 20:39:32.010956][info][265048][G305Device.cpp:616] UVCAutoRebootOnFault=true for device: Gemini 305
+[08/26 20:39:32.024477][info][265048][DeviceBase.cpp:742] key: AppSlot,value:1
+[08/26 20:39:32.024489][info][265048][DeviceBase.cpp:742] key: HwType,value:S1
+[08/26 20:39:32.024491][info][265048][DeviceBase.cpp:742] key: HwVer,value:V1.3
+[08/26 20:39:32.024492][info][265048][DeviceBase.cpp:742] key: IspFwVer,value:20260401
+[08/26 20:39:32.024494][info][265048][DeviceBase.cpp:742] key: IspNeedVer,value:20250920
+[08/26 20:39:32.024496][info][265048][DeviceBase.cpp:742] key: PresetVer,value:0.0.9
+[08/26 20:39:32.262863][info][265048][DeviceManager.cpp:200] Device created successfully! Name: Gemini 305, PID: 0x0840, SN/ID: CV2L360000NR FW: 1.0.52
+[08/26 20:39:32.263128][info][265048][Pipeline.cpp:54] [CV2L360000NR] Pipeline created with device: {name: Gemini 305, sn: CV2L360000NR}, @0xAAAAE0BA9720
+[08/26 20:39:32.585987][info][265048][G305Device.cpp:616] UVCAutoRebootOnFault=true for device: Gemini 305
+[08/26 20:39:32.597646][info][265048][DeviceBase.cpp:742] key: AppSlot,value:1
+[08/26 20:39:32.597659][info][265048][DeviceBase.cpp:742] key: HwType,value:S1
+[08/26 20:39:32.597660][info][265048][DeviceBase.cpp:742] key: HwVer,value:V1.3
+[08/26 20:39:32.597661][info][265048][DeviceBase.cpp:742] key: IspFwVer,value:20260401
+[08/26 20:39:32.597662][info][265048][DeviceBase.cpp:742] key: IspNeedVer,value:20250920
+[08/26 20:39:32.597663][info][265048][DeviceBase.cpp:742] key: PresetVer,value:0.0.9
+[08/26 20:39:32.837694][info][265048][DeviceManager.cpp:200] Device created successfully! Name: Gemini 305, PID: 0x0840, SN/ID: CV2L360000D9 FW: 1.0.52
+[08/26 20:39:32.837987][info][265048][Pipeline.cpp:54] [CV2L360000D9] Pipeline created with device: {name: Gemini 305, sn: CV2L360000D9}, @0xAAAAE0C6A200
+[08/26 20:39:32.838042][info][265048][Pipeline.cpp:65] [CV2L360000NR] Pipeline destroyed! @0xAAAAE0BA9720
+[08/26 20:39:32.838277][info][265048][SensorBase.cpp:53] [CV2L360000NR] SensorBase is destroyed
+[08/26 20:39:32.859652][info][265048][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[08/26 20:39:32.859670][info][265048][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done
+[08/26 20:39:32.860167][info][265048][SensorBase.cpp:53] [CV2L360000NR] SensorBase is destroyed
+[08/26 20:39:32.890291][info][265048][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[08/26 20:39:32.890307][info][265048][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done
+[08/26 20:39:33.269054][info][265048][G330Device.cpp:630] UVCAutoRebootOnFault=true for device: Gemini 335L
+[08/26 20:39:33.275905][info][265048][DeviceBase.cpp:742] key: IspFwVer,value:20240523
+[08/26 20:39:33.469330][warning][265048][PropertyServer.cpp:55] [CP3294Y0001E] Property not found to register callback, propertyId: 205
+[08/26 20:39:33.469416][warning][265048][PropertyServer.cpp:55] [CP3294Y0001E] Property not found to register callback, propertyId: 204
+[08/26 20:39:33.469437][warning][265048][PropertyServer.cpp:55] [CP3294Y0001E] Property not found to register callback, propertyId: 211
+[08/26 20:39:33.469446][warning][265048][PropertyServer.cpp:55] [CP3294Y0001E] Property not found to register callback, propertyId: 212
+[08/26 20:39:33.469457][warning][265048][PropertyServer.cpp:55] [CP3294Y0001E] Property not found to register callback, propertyId: 5525
+[08/26 20:39:33.469470][warning][265048][PropertyServer.cpp:55] [CP3294Y0001E] Property not found to register callback, propertyId: 277
+[08/26 20:39:33.470018][warning][265048][PropertyConfigHandler.hpp:53] Unsupported property '223', skipping getting, return nullvalue
+[08/26 20:39:33.473027][warning][265048][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: Protocol.cpp(39)
+ - msg: Request failed, device response with error, errorCode: 2, msg: , propertyId: 2052
+ - type: IO
+ - status: 1005
+[08/26 20:39:33.473383][warning][265048][G330PresetManager.cpp:98] Execute failure! A libobsensor_exception has occurred!
+ - where: G330PresetManager.cpp(98):G330PresetManager
+ - msg: Request failed, device response with error, errorCode: 2, msg: , propertyId: 2052
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 1005
+[08/26 20:39:33.473415][info][265048][DeviceManager.cpp:200] Device created successfully! Name: Gemini 335L, PID: 0x0804, SN/ID: CP3294Y0001E FW: 1.2.81
+[08/26 20:39:33.473734][info][265048][Pipeline.cpp:54] [CP3294Y0001E] Pipeline created with device: {name: Gemini 335L, sn: CP3294Y0001E}, @0xAAAAE0C83B30
+[08/26 20:39:33.473761][info][265048][Pipeline.cpp:65] [CV2L360000D9] Pipeline destroyed! @0xAAAAE0C6A200
+[08/26 20:39:33.474027][info][265048][SensorBase.cpp:53] [CV2L360000D9] SensorBase is destroyed
+[08/26 20:39:33.495100][info][265048][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[08/26 20:39:33.495114][info][265048][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done
+[08/26 20:39:33.495679][info][265048][SensorBase.cpp:53] [CV2L360000D9] SensorBase is destroyed
+[08/26 20:39:33.524921][info][265048][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[08/26 20:39:33.524936][info][265048][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done
+[08/26 20:39:33.692427][info][265048][Pipeline.cpp:65] [CP3294Y0001E] Pipeline destroyed! @0xAAAAE0C83B30
+[08/26 20:39:33.692721][info][265048][SensorBase.cpp:53] [CP3294Y0001E] SensorBase is destroyed
+[08/26 20:39:33.713872][info][265048][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[08/26 20:39:33.713886][info][265048][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done
+[08/26 20:39:33.714131][info][265048][SensorBase.cpp:53] [CP3294Y0001E] SensorBase is destroyed
+[08/26 20:39:33.744163][info][265048][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[08/26 20:39:33.744179][info][265048][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ESO-Robot 机器人控制</title>
+  <link rel="stylesheet" href="./style.css?v=20260809-0052">
+</head>
+<body>
+  <div class="rotate-hint">
+    <strong>请横屏使用</strong>
+    <span>手机横屏后会显示完整控制面板，电脑浏览器可直接使用。</span>
+  </div>
+
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="topbar-title">ESO-Robot 控制台</div>
+    </div>
+    <button class="connection" id="connectionState" type="button" title="点击修改连接">
+      <span class="conn-dot"></span>
+      <span id="connLabel">未连接</span>
+      <small id="bridgeUrl">/ws/robot</small>
+    </button>
+    <div class="state-strip">
+      <span>电量 <b id="batteryState">--</b></span>
+      <span>电压 <b id="voltageState">--</b></span>
+      <span>温度 <b id="batteryTempState">--</b></span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="left-col">
+      <div class="panel">
+        <label class="field" id="startupModeField">
+          <span>启动模式</span>
+          <select id="startupArmMode">
+            <option value="trajectory">trajectory（轨迹）</option>
+            <option value="gravity_pd">gravity_pd（重力 PD）</option>
+            <option value="cartesian">cartesian（笛卡尔 /move_pose）</option>
+          </select>
+        </label>
+        <div class="button-row">
+          <button class="btn btn-start" id="startupBtn">启动</button>
+          <button class="btn btn-stop" id="stopBtn">急停</button>
+        </div>
+        <button class="btn btn-ghost" id="resetBtn">Reset / 清理启动进程</button>
+        <p class="hint" id="startupHint">切换模式：急停 → Reset → 选择模式 → 启动</p>
+      </div>
+
+      <div class="panel compact">
+        <div class="panel-title">移动底盘</div>
+        <div class="rotate-row">
+          <button class="base-action-btn" data-base="rotate-left">左旋转</button>
+          <button class="base-action-btn brake" data-base="brake">刹车</button>
+          <button class="base-action-btn" data-base="rotate-right">右旋转</button>
+        </div>
+        <div class="joystick-row">
+          <div class="joystick-control">
+            <div class="joystick" id="moveJoy" aria-label="底盘平移摇杆">
+              <div class="joy-knob" id="moveJoyKnob"></div>
+            </div>
+            <span>前后左右移动</span>
+          </div>
+        </div>
+        <label class="field">
+          <span>速度倍率 <b id="baseSpeedValue">30%</b></span>
+          <input id="baseSpeed" type="range" min="0" max="1" step="0.05" value="0.3">
+        </label>
+        <div class="chassis-velocity" aria-label="底盘速度">
+          <b id="chassisVelocityState">--</b>
+        </div>
+        <div class="chassis-state-controls" aria-label="底盘状态控制">
+          <button type="button" data-chassis-command="enable">使能</button>
+          <button type="button" data-chassis-command="disable">失能</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="center-col">
+      <div class="panel log-panel">
+        <div class="panel-title">系统日志</div>
+        <div class="log-list" id="logList"></div>
+      </div>
+
+      <div class="panel robot-panel">
+        <div class="panel-title">状态概览</div>
+        <div class="robot-card">
+          <div class="state-list">
+            <div><span>模式</span><b id="armModeState">trajectory</b></div>
+            <div><span>左夹爪目标</span><b id="leftGripperState">0.00</b></div>
+            <div><span>右夹爪目标</span><b id="rightGripperState">0.00</b></div>
+            <div class="ee-row"><span>左末端位置</span><b id="leftEePosState">--</b></div>
+            <div class="ee-row"><span>左末端姿态</span><b id="leftEeQuatState">--</b></div>
+            <div class="ee-row"><span>右末端位置</span><b id="rightEePosState">--</b></div>
+            <div class="ee-row"><span>右末端姿态</span><b id="rightEeQuatState">--</b></div>
+            <div><span>腰部位置</span><b id="waistPositionState">--</b></div>
+            <div><span>腰部速度</span><b id="waistVelocityState">--</b></div>
+            <div><span>腰部力矩</span><b id="waistTorqueState">--</b></div>
+            <div><span>升降位置</span><b id="liftPositionState">--</b></div>
+            <div><span>升降速度</span><b id="liftVelocityState">--</b></div>
+            <div><span>升降使能</span><b id="liftEnabledState">--</b></div>
+            <div><span>底盘状态</span><b id="chassisStatusState">--</b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="right-col">
+      <nav class="mode-tabs">
+        <button class="mode-tab active" data-panel="armsPanel">双臂轨迹控制</button>
+        <button class="mode-tab" data-panel="cartesianPanel">笛卡尔控制</button>
+        <button class="mode-tab" data-panel="waistPanel">腰部</button>
+        <button class="mode-tab" data-panel="liftPanel">升降</button>
+      </nav>
+
+      <div class="panel control-panel" id="armsPanel">
+        <div class="panel-title">双臂关节角度（rad，来自 URDF）</div>
+        <div class="arm-tabs">
+          <button class="arm-tab active" data-arm="left">左臂</button>
+          <button class="arm-tab" data-arm="right">右臂</button>
+        </div>
+        <div class="joint-list" id="jointList"></div>
+        <div class="button-row">
+          <button class="btn btn-primary btn-compact-action" id="sendArmsBtn">发送双臂目标</button>
+          <button class="btn btn-ghost" id="zeroArmsBtn">归零</button>
+        </div>
+        <label class="field inline">
+          <span>轨迹时间</span>
+          <input id="trajectoryDuration" type="number" min="0.2" max="10" step="0.1" value="2.0">
+          <em>s</em>
+        </label>
+        <div class="gripper-row">
+          <label class="field">
+            <span>左夹爪 <b id="leftGripperValue">0.00</b></span>
+            <input id="leftGripper" type="range" min="0" max="1" step="0.01" value="0">
+          </label>
+          <button class="btn btn-primary" id="sendLeftGripperBtn">发送左夹爪</button>
+        </div>
+        <div class="gripper-row">
+          <label class="field">
+            <span>右夹爪 <b id="rightGripperValue">0.00</b></span>
+            <input id="rightGripper" type="range" min="0" max="1" step="0.01" value="0">
+          </label>
+          <button class="btn btn-primary" id="sendRightGripperBtn">发送右夹爪</button>
+        </div>
+      </div>
+
+      <div class="panel control-panel hidden" id="cartesianPanel">
+        <div class="panel-title">笛卡尔末端位姿（末端在基座系下的 pose）</div>
+        <div class="arm-tabs">
+          <button class="arm-tab active" data-cart-arm="left">左臂</button>
+          <button class="arm-tab" data-cart-arm="right">右臂</button>
+        </div>
+
+        <div class="cart-section">
+          <div class="cart-label">Position (m)</div>
+          <label class="field"><span>X <b id="cartPosXValue">0.000</b></span><input id="cartPosX" type="range" min="-0.4" max="0.4" step="0.001" value="0"></label>
+          <label class="field"><span>Y <b id="cartPosYValue">0.150</b></span><input id="cartPosY" type="range" min="-0.4" max="0.4" step="0.001" value="0.15"></label>
+          <label class="field"><span>Z <b id="cartPosZValue">0.160</b></span><input id="cartPosZ" type="range" min="-0.2" max="0.6" step="0.001" value="0.16"></label>
+        </div>
+
+        <div class="cart-section">
+          <div class="cart-label">Orientation (四元数 qx/qy/qz/qw)</div>
+          <label class="field"><span>qx <b id="cartOriXValue">1.000</b></span><input id="cartOriX" type="range" min="-1" max="1" step="0.001" value="1.0"></label>
+          <label class="field"><span>qy <b id="cartOriYValue">0.000</b></span><input id="cartOriY" type="range" min="-1" max="1" step="0.001" value="0.0"></label>
+          <label class="field"><span>qz <b id="cartOriZValue">0.000</b></span><input id="cartOriZ" type="range" min="-1" max="1" step="0.001" value="0.0"></label>
+          <label class="field"><span>qw <b id="cartOriWValue">0.000</b></span><input id="cartOriW" type="range" min="-1" max="1" step="0.001" value="0.0"></label>
+        </div>
+
+        <label class="field"><span>速度缩放 vel_scale <b id="cartVelScaleValue">0.20</b></span><input id="cartVelScale" type="range" min="0" max="1" step="0.01" value="0.2"></label>
+        <label class="field"><span>加速度缩放 acc_scale <b id="cartAccScaleValue">0.20</b></span><input id="cartAccScale" type="range" min="0" max="1" step="0.01" value="0.2"></label>
+        <label class="field inline checkbox-field">
+          <input id="cartPlanOnly" type="checkbox">
+          <span>仅规划不执行 (plan_only)</span>
+        </label>
+        <div class="button-row">
+          <button class="btn btn-ghost" id="cartHomeBtn">原点</button>
+          <button class="btn btn-primary" id="sendCartesianBtn">发送笛卡尔目标</button>
+        </div>
+      </div>
+
+      <div class="panel control-panel hidden" id="waistPanel">
+        <div class="panel-title">腰部控制（限位 -0.1 ~ 1.51 rad）</div>
+        <label class="field">
+          <span>位置 <b id="waistPositionValue">0.000 rad</b></span>
+          <div class="range-ends"><em>-0.10</em><em>1.51</em></div>
+          <input id="waistPosition" type="range" min="-0.1" max="1.51" step="0.001" value="0">
+        </label>
+        <label class="field">
+          <span>速度 <b id="waistVelocityValue">0.300 rad/s</b></span>
+          <div class="range-ends"><em>0.00</em><em>1.00</em></div>
+          <input id="waistVelocity" type="range" min="0" max="1" step="0.01" value="0.3">
+        </label>
+        <label class="field">
+          <span>力矩限制 <b id="waistTorqueValue">80 N·m</b></span>
+          <div class="range-ends"><em>0</em><em>100</em></div>
+          <input id="waistTorque" type="range" min="0" max="100" step="1" value="80">
+        </label>
+        <button class="btn btn-primary" id="sendWaistBtn">发送腰部命令</button>
+      </div>
+
+      <div class="panel control-panel hidden" id="liftPanel">
+        <div class="panel-title">升降控制（mm / mm/s）</div>
+        <label class="field"><span>目标位置 <b id="liftPositionValue">100 mm</b></span><input id="liftPosition" type="range" min="0" max="400" step="1" value="100"></label>
+        <label class="field"><span>速度 <b id="liftVelocityValue">20 mm/s</b></span><input id="liftVelocity" type="range" min="0" max="120" step="1" value="20"></label>
+        <div class="button-row">
+          <button class="btn btn-primary" id="sendLiftVelocityBtn">设置速度</button>
+          <button class="btn btn-primary" id="sendLiftPositionBtn">移动到位置</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal-backdrop hidden" id="connectModal" role="dialog" aria-modal="true">
+    <form class="modal" id="connectForm">
+      <h2>连接 robot_bridge</h2>
+      <p>如果这里反复断开，请确认 robot_bridge 节点已启动。</p>
+      <label class="field">
+        <span>WebSocket 地址</span>
+        <input id="connectUrl" type="text" placeholder="ws://127.0.0.1:8000/ws/robot">
+      </label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="closeConnectModal" type="button">取消</button>
+        <button class="btn btn-primary" type="submit">重新连接</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="./app.js?v=20260809-0052" defer></script>
+</body>
+</html>
