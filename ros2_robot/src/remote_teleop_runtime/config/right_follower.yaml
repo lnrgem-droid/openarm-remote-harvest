@@ -10,7 +10,8 @@
     gripper_kp: 5.0
     gripper_kd: 1.0
     gripper_max_rad: -1.0472
-    max_joint_vel: [0.15, 0.15, 0.15, 0.15, 0.25, 0.25, 0.25]
+    # J7 wrist pitch only: a small, bounded increase for responsiveness.
+    max_joint_vel: [0.15, 0.15, 0.15, 0.15, 0.25, 0.25, 0.35]
     command_interp_s: 0.02
     publish_joint_states: true
     joint_states_rate: 100.0
