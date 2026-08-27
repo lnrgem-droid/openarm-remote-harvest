@@ -2,7 +2,7 @@
 
 The checked-in launch configuration is deliberately **right-arm only**:
 
-- x86 leader: `can2`
+- x86 leader: `can0`
 - Jetson follower: `can1`
 - UDP action/state: `50010/50011`, 100 Hz
 - follower CAN loop: 500 Hz

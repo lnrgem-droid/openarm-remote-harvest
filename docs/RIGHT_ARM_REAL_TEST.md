@@ -5,7 +5,7 @@ included in v1 and must remain disconnected from the running processes.
 
 ## Fixed mapping
 
-- x86 leader right arm: `can2`, host `192.168.50.1`
+- x86 leader right arm: `can0`, host `192.168.50.1`
 - Jetson follower right arm: `can1`, host `192.168.50.2`
 - action/state UDP: `50010/50011`
 - action network rate: 100 Hz; follower CAN loop: 500 Hz
@@ -25,8 +25,9 @@ Normal stop is: `hold`, physically support the follower, then `disable`.
 1. Configure and verify only the required CAN interface on each host.
 2. Start the Jetson follower with `reaction_verified:=false`. It enables only
    `can1`, holds the measured pose and refuses `run`.
-3. Start the x86 leader. It enables only `can2` in gravity-compensation mode.
-4. On the Jetson, check `remote-teleop-control status`.
+3. Start the x86 leader. It enables only `can0` in gravity-compensation mode.
+4. On the Jetson, check
+   `ros2 run remote_teleop_runtime remote-teleop-control status`.
 5. With the helper supporting the follower, pause MIT refresh for 300 ms, resume,
    inspect joint state, then repeat for 1 s. The service automatically resumes at
    1.2 s even if the terminal command is interrupted.
