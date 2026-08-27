@@ -23,12 +23,7 @@ def _nodes(context):
     if verified: watchdog_args += ["--verified-reaction", "position_hold"]
     controller_prefix = None
     if debug_controller:
-        controller_prefix = [
-            "gdb", "-q", "--batch",
-            "-ex", "run",
-            "-ex", "thread apply all bt",
-            "--args",
-        ]
+        controller_prefix = "gdb -q --batch -ex run -ex 'thread apply all bt' --args"
     return [
         Node(package="remote_teleop_follower_safety",
              executable="remote-teleop-follower-watchdog",
