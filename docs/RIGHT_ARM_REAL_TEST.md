@@ -26,7 +26,8 @@ Normal stop is: `hold`, physically support the follower, then `disable`.
 2. Start the Jetson follower with `reaction_verified:=false`. It enables only
    `can1`, holds the measured pose and refuses `run`.
 3. Start the x86 leader. It enables only `can2` in gravity-compensation mode.
-4. On the Jetson, check `remote-teleop-control status`.
+4. On the Jetson, check
+   `ros2 run remote_teleop_runtime remote-teleop-control status`.
 5. With the helper supporting the follower, pause MIT refresh for 300 ms, resume,
    inspect joint state, then repeat for 1 s. The service automatically resumes at
    1.2 s even if the terminal command is interrupted.

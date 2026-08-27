@@ -13,7 +13,8 @@ remote targets only while the independent watchdog reports `RUNNING`. `hold`, st
 action data, stale watchdog permission, and faults all publish the latest measured pose.
 
 The watchdog must be started separately. Use
-`remote-teleop-control status|align|run|hold|reset|disable` on the Jetson. `disable`
+`ros2 run remote_teleop_runtime remote-teleop-control status|align|run|hold|reset|disable`
+on the Jetson. `disable`
 is only valid after an operator supports the arm; it latches E-stop and calls the
 controller disable service.
 
