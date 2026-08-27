@@ -224,11 +224,11 @@ public:
     // so run them independently at an absolute 500 Hz schedule.
     control_running_.store(true);
     const auto control_period = std::chrono::duration<double>(1.0 / control_rate);
-    if (right_arm_->isInitialized()) {
+    if (right_arm_ && right_arm_->isInitialized()) {
       right_control_thread_ =
         std::thread([this, control_period]() { controlThread(right_arm_.get(), control_period); });
     }
-    if (left_arm_->isInitialized()) {
+    if (left_arm_ && left_arm_->isInitialized()) {
       left_control_thread_ =
         std::thread([this, control_period]() { controlThread(left_arm_.get(), control_period); });
     }
