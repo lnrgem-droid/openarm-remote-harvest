@@ -41,6 +41,13 @@ class FollowerGateway(Node):
         self.positions = [0.0] * 16; self.velocities = [0.0] * 16
         self.have_feedback = False; self.last_feedback_ns = 0
         self.latest_action = None; self.last_action_rx_ns = 0; self.peer_ip = None
+        # RUN uses a captured leader/follower pair as its reference. This avoids
+        # an alignment tolerance becoming a sudden absolute-position correction
+        # when remote control is enabled: follower_target = follower_zero +
+        # (leader_now - leader_zero).
+        self.run_leader_right = None; self.run_follower_right = None
+        self.run_leader_gripper = None; self.run_follower_gripper = None
+        self.last_target_right = None
         self.safety = {"state": "ALIGNING", "fault_bits": 0, "reason": "waiting for watchdog"}
         self.safety_rx_ns = 0; self.align_since_ns = 0
         self.applied_session = self.applied_sequence = self.action_timestamp_ns = 0
@@ -95,13 +102,19 @@ class FollowerGateway(Node):
         running = self.safety.get("state") == "RUNNING" and now_ns - self.safety_rx_ns < 100_000_000
         fresh = self.latest_action is not None and now_ns - self.last_action_rx_ns <= 100_000_000
         desired = list(self.positions[8:15]); gripper_rad = self.positions[15]
-        if running and fresh:
+        if running and fresh and self.run_leader_right is not None:
             remote = self.latest_action
+            requested = [follower_zero + (leader_now - leader_zero)
+                         for follower_zero, leader_now, leader_zero in zip(
+                             self.run_follower_right, remote.right_arm, self.run_leader_right)]
             desired = [max(q - 0.20, min(q + 0.20, target))
-                       for q, target in zip(desired, remote.right_arm)]
-            gripper_rad = remote.right_gripper
+                       for q, target in zip(desired, requested)]
+            gripper_rad = max(GRIPPER_MAX_RAD, min(0.0,
+                self.run_follower_gripper +
+                (remote.right_gripper - self.run_leader_gripper)))
             self.applied_session = remote.session_id; self.applied_sequence = remote.sequence
             self.action_timestamp_ns = now_ns
+        self.last_target_right = tuple(desired)
         msg = JointState(); msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = [f"openarm_right_joint{i}" for i in range(1, 8)] + ["openarm_right_gripper"]
         msg.position = desired + [max(0.0, min(1.0, gripper_rad / GRIPPER_MAX_RAD))]
@@ -111,7 +124,7 @@ class FollowerGateway(Node):
         try:
             while True:
                 raw, peer = self.command.recvfrom(4096); request = json.loads(raw.decode())
-                cmd = request.get("command"); response = dict(self.safety)
+                cmd = request.get("command"); response = self.runtime_status()
                 if cmd == "status": pass
                 elif cmd == "align":
                     if not self.latest_action or not self.have_feedback: raise RuntimeError("missing action or feedback")
@@ -122,9 +135,17 @@ class FollowerGateway(Node):
                 elif cmd == "run":
                     if not self.latest_action: raise RuntimeError("no leader session")
                     response = safety_command(self.watchdog, "request_run", leader_session_id=self.latest_action.session_id) or {}
-                elif cmd == "hold": response = safety_command(self.watchdog, "hold") or {}
+                    if response.get("state") == "RUNNING":
+                        self.run_leader_right = tuple(self.latest_action.right_arm)
+                        self.run_follower_right = tuple(self.positions[8:15])
+                        self.run_leader_gripper = self.latest_action.right_gripper
+                        self.run_follower_gripper = self.positions[15]
+                elif cmd == "hold":
+                    response = safety_command(self.watchdog, "hold") or {}
+                    self.clear_run_reference()
                 elif cmd == "reset":
                     self.tracker.reset(); self.latest_action = None; self.last_action_rx_ns = 0
+                    self.clear_run_reference()
                     response = safety_command(self.watchdog, "reset", estop_released=True) or {}
                 elif cmd == "disable":
                     safety_command(self.watchdog, "estop")
@@ -135,6 +156,20 @@ class FollowerGateway(Node):
         except BlockingIOError: pass
         except Exception as exc:
             if 'peer' in locals(): self.command.sendto(json.dumps({"error": str(exc)}).encode(), peer)
+
+    def clear_run_reference(self):
+        self.run_leader_right = self.run_follower_right = None
+        self.run_leader_gripper = self.run_follower_gripper = None
+        self.last_target_right = None
+
+    def runtime_status(self):
+        response = dict(self.safety)
+        if self.last_target_right is not None:
+            response["max_tracking_error_rad"] = max(
+                abs(target - actual) for target, actual in zip(
+                    self.last_target_right, self.positions[8:15]))
+        response["relative_follow_reference_captured"] = self.run_leader_right is not None
+        return response
 
     def send_state(self, now_ns):
         if not self.peer_ip or not self.have_feedback: return
