@@ -76,10 +76,16 @@ class FollowerGateway(Node):
         if not self.have_feedback:
             return
         self.hb_sequence += 1
+        # `last_control_cycle_ns` describes this gateway's 100 Hz safety cycle,
+        # not the asynchronous 100 Hz ROS feedback callback.  Using the latter
+        # made ordinary DDS scheduling jitter look like a stalled controller.
+        # Feedback freshness is instead checked explicitly as CAN health with a
+        # 250 ms bound, still well below the time needed to use stale data.
+        feedback_fresh = now_ns - self.last_feedback_ns < 250_000_000
         hb = ControllerHeartbeat(self.session, self.hb_sequence, now_ns,
-            self.last_feedback_ns or now_ns, self.last_action_rx_ns,
+            now_ns, self.last_action_rx_ns,
             self.latest_action.session_id if self.latest_action else 0,
-            self.have_feedback and now_ns - self.last_feedback_ns < 50_000_000, False, 0)
+            self.have_feedback and feedback_fresh, False, 0)
         reply = self.watchdog.exchange(encode_heartbeat(hb), 0.004)
         if reply is not None:
             self.safety = reply; self.safety_rx_ns = now_ns
