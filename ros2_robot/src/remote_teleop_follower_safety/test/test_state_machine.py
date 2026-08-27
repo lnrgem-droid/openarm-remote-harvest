@@ -40,6 +40,19 @@ def test_explicit_happy_path():
     assert machine.state is ControlState.RUNNING
 
 
+def test_hold_requires_another_explicit_run():
+    machine = verified_machine()
+    machine.observe_leader_session(10)
+    machine.alignment_complete(10)
+    machine.request_run(10)
+    machine.request_hold()
+    snapshot = machine.snapshot()
+    assert snapshot.state is ControlState.READY
+    assert snapshot.aligned
+    machine.request_run(10)
+    assert machine.state is ControlState.RUNNING
+
+
 def test_leader_session_change_while_running_latches_fault():
     machine = verified_machine()
     machine.observe_leader_session(10)

@@ -116,6 +116,13 @@ class SafetyStateMachine:
         self._state = ControlState.RUNNING
         self._reason = "explicit RUN accepted"
 
+    def request_hold(self) -> None:
+        """Leave RUNNING without clearing the verified alignment."""
+        if self._state not in (ControlState.RUNNING, ControlState.READY):
+            raise TransitionError("HOLD is valid only from READY or RUNNING")
+        self._state = ControlState.READY
+        self._reason = "explicit HOLD accepted; fresh RUN request required"
+
     def trip(self, fault: FaultBits, reason: str) -> None:
         fault = FaultBits(fault)
         if fault == FaultBits.NONE:

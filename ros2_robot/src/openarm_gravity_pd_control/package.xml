@@ -15,6 +15,7 @@
 
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
 
   <!-- C++ dynamics / CAN dependencies -->
   <build_depend>liborocos-kdl-dev</build_depend>

@@ -89,7 +89,7 @@ public:
   ~ArmController();
 
   /**
-   * Initialize KDL dynamics and CAN bus motors, then homing to zero.
+   * Initialize KDL dynamics and CAN bus motors, holding the measured pose.
    * @return true on success.
    */
   bool init();
@@ -107,6 +107,9 @@ public:
    */
   void controlStep();
 
+  /** Refresh feedback without sending MIT commands (supervised safety test only). */
+  void feedbackOnlyStep();
+
   /** Disable all motors (call on node shutdown). */
   void disable();
 
@@ -117,9 +120,6 @@ private:
   void applyPositionLimits(std::vector<double> & positions) const;
   /// Run one control step toward an optional direct target; nullptr uses ROS commands.
   void executeControlStep(const std::vector<double> * direct_target);
-
-  /** Linearly interpolate joint targets from current pose to zero. Blocks until done. */
-  void returnToZeroInterpolated(double duration_s);
 
   std::string can_interface_;
   ArmControlParams params_;

@@ -43,16 +43,19 @@ def main() -> None:
     parser.add_argument("--socket", default="/tmp/openarm_follower_watchdog.sock")
     parser.add_argument("--duration", type=float, default=0.0, help="0 means run until signal")
     parser.add_argument(
-        "--simulation-verified-reaction",
+        "--verified-reaction",
         choices=("position_hold",),
-        help="simulation only; never proves a physical robot reaction",
+        help="operator assertion recorded only after the supervised physical reaction test",
     )
+    parser.add_argument("--simulation-verified-reaction", choices=("position_hold",),
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     reaction = SafetyReaction.UNDECIDED
     verified = False
-    if args.simulation_verified_reaction:
-        reaction = SafetyReaction(args.simulation_verified_reaction)
+    selected_reaction = args.verified_reaction or args.simulation_verified_reaction
+    if selected_reaction:
+        reaction = SafetyReaction(selected_reaction)
         verified = True
 
     machine = SafetyStateMachine(reaction, verified)
@@ -81,7 +84,7 @@ def main() -> None:
     try:
         while not stopping and (deadline is None or time.monotonic() < deadline):
             try:
-                datagram = sock.recv(4096)
+                datagram, peer = sock.recvfrom(4096)
                 kind, message = decode_local(datagram)
                 now_ns = time.monotonic_ns()
                 if kind == "heartbeat":
@@ -92,16 +95,24 @@ def main() -> None:
                         machine.alignment_complete(int(message["leader_session_id"]))
                     elif command == "request_run":
                         machine.request_run(int(message["leader_session_id"]))
+                    elif command == "hold":
+                        machine.request_hold()
                     elif command == "reset":
                         supervisor.reset_fault(
                             now_ns, estop_released=message["estop_released"]
                         )
                     elif command == "estop":
                         machine.trip(FaultBits.E_STOP_ACTIVE, "local E-stop command")
+                    elif command == "status":
+                        pass
+                if peer:
+                    sock.sendto(_snapshot_json(supervisor).encode("utf-8"), peer)
             except socket.timeout:
                 pass
             except (LocalProtocolError, TransitionError, KeyError, TypeError, ValueError) as exc:
                 machine.trip(FaultBits.INVALID_COMMAND, f"local watchdog input rejected: {exc}")
+                if "peer" in locals() and peer:
+                    sock.sendto(_snapshot_json(supervisor).encode("utf-8"), peer)
             supervisor.check(time.monotonic_ns())
             current = machine.snapshot()
             if current != previous:

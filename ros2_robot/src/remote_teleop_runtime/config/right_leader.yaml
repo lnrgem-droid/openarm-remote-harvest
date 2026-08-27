@@ -1,0 +1,12 @@
+openarm_gravity_pd_node:
+  ros__parameters:
+    enable_right: true
+    enable_left: false
+    right_arm_can: can2
+    control_rate: 500.0
+    kp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    kd: [0.4, 0.4, 0.3, 0.3, 0.15, 0.15, 0.15]
+    gripper_kp: 0.0
+    gripper_kd: 0.1
+    publish_joint_states: true
+    joint_states_rate: 100.0

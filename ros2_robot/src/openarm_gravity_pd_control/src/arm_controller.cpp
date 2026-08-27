@@ -167,8 +167,20 @@ bool ArmController::init()
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   initialized_ = true;
-  returnToZeroInterpolated(2.0);
-  target_gripper_ = 0.0;
+  // Remote mode must never move merely because the process started.  The first
+  // control step seeds command_positions_ from this measured pose; until an
+  // explicit command arrives the arm therefore holds where it was enabled.
+  const auto & arm_motors = openarm_->get_arm().get_motors();
+  target_positions_.assign(ARM_DOF, 0.0);
+  for (size_t i = 0; i < std::min(arm_motors.size(), ARM_DOF); ++i) {
+    target_positions_[i] = arm_motors[i].get_position();
+  }
+  const auto & gripper_motors = openarm_->get_gripper().get_motors();
+  if (!gripper_motors.empty() && params_.gripper_max_rad != 0.0) {
+    target_gripper_ = std::clamp(
+      gripper_motors[0].get_position() / params_.gripper_max_rad, 0.0, 1.0);
+  }
+  new_target_pending_ = true;
 
   std::cout << "[ArmController][" << can_interface_ << "] Ready." << std::endl;
   return true;
@@ -236,6 +248,29 @@ void ArmController::setTargetJointState(const sensor_msgs::msg::JointState::Shar
 void ArmController::controlStep()
 {
   executeControlStep(nullptr);
+}
+
+void ArmController::feedbackOnlyStep()
+{
+  if (!initialized_) return;
+  openarm_->refresh_all();
+  openarm_->recv_all();
+  const auto & motors = openarm_->get_arm().get_motors();
+  JointStateSnapshot snapshot;
+  for (size_t i = 0; i < std::min(motors.size(), ARM_DOF); ++i) {
+    snapshot.position.push_back(motors[i].get_position());
+    snapshot.velocity.push_back(motors[i].get_velocity());
+    snapshot.effort.push_back(motors[i].get_torque());
+  }
+  const auto & gripper = openarm_->get_gripper().get_motors();
+  if (!gripper.empty() && params_.gripper_max_rad != 0.0) {
+    snapshot.gripper_position = std::clamp(
+      GRIPPER_OPEN_M * gripper[0].get_position() / params_.gripper_max_rad,
+      0.0, GRIPPER_OPEN_M);
+  }
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  latest_state_ = std::move(snapshot);
+  latest_state_valid_ = true;
 }
 
 void ArmController::executeControlStep(const std::vector<double> * direct_target)
@@ -375,47 +410,6 @@ void ArmController::applyPositionLimits(std::vector<double> & positions) const
   for (size_t i = 0; i < std::min(positions.size(), ARM_DOF); ++i) {
     positions[i] = std::clamp(positions[i], pos_min_[i], pos_max_[i]);
   }
-}
-
-void ArmController::returnToZeroInterpolated(double duration_s)
-{
-  openarm_->refresh_all();
-  openarm_->recv_all();
-
-  const auto & arm_motors = openarm_->get_arm().get_motors();
-  std::vector<double> start_q(ARM_DOF, 0.0);
-  std::vector<double> home_target(ARM_DOF, 0.0);
-  for (size_t i = 0; i < std::min(arm_motors.size(), ARM_DOF); ++i) {
-    start_q[i] = arm_motors[i].get_position();
-  }
-
-  RCLCPP_INFO(logger_, "Homing to zero over %.1f s...", duration_s);
-
-  const auto t0 = std::chrono::steady_clock::now();
-  while (true) {
-    const double elapsed =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    const double alpha = std::min(elapsed / duration_s, 1.0);
-
-    for (size_t i = 0; i < ARM_DOF; ++i) {
-      home_target[i] = start_q[i] * (1.0 - alpha);
-    }
-    applyPositionLimits(home_target);
-
-    executeControlStep(&home_target);
-
-    if (alpha >= 1.0) {
-      break;
-    }
-    const auto sleep_ms = std::max(
-      1, static_cast<int>(std::lround(params_.control_dt * 1000.0)));
-    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-  }
-
-  std::lock_guard<std::mutex> lock(target_mutex_);
-  target_positions_ = home_target;
-  new_target_pending_ = true;
-  RCLCPP_INFO(logger_, "Homing complete.");
 }
 
 }  // namespace openarm_gravity_pd_control
