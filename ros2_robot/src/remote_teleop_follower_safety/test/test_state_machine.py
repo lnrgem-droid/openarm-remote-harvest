@@ -53,6 +53,12 @@ def test_hold_requires_another_explicit_run():
     assert machine.state is ControlState.RUNNING
 
 
+def test_hold_is_idempotent_during_alignment():
+    machine = verified_machine()
+    machine.request_hold()
+    assert machine.state is ControlState.ALIGNING
+
+
 def test_leader_session_change_while_running_latches_fault():
     machine = verified_machine()
     machine.observe_leader_session(10)
