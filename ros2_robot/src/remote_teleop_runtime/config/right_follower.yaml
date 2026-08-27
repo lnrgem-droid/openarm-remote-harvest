@@ -4,6 +4,11 @@ openarm_gravity_pd_node:
     enable_left: false
     right_arm_can: can1
     control_rate: 500.0
+    # J7 is the final wrist pitch axis.  Its stock gain is too soft to
+    # overcome static friction for small up/down commands; increase only this
+    # axis while retaining the conservative speed limit below.
+    kp: [50.0, 50.0, 50.0, 40.0, 8.0, 8.0, 12.0]
+    kd: [2.0, 2.0, 1.5, 1.5, 0.5, 0.5, 0.6]
     max_joint_vel: [0.15, 0.15, 0.15, 0.15, 0.25, 0.25, 0.25]
     command_interp_s: 0.02
     publish_joint_states: true
