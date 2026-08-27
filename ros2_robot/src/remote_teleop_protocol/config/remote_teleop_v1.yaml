@@ -1,0 +1,50 @@
+# Interface defaults only. No executable in this package accesses motors or CAN.
+protocol:
+  version: 1
+  transport: udp
+  action_port: 50010
+  state_port: 50011
+  diagnostics_port: 50012
+  max_datagram_bytes: 1200
+
+network:
+  leader_ip: 192.168.50.1
+  follower_ip: 192.168.50.2
+
+timing:
+  # Initial test values, not final control guarantees. Phase-0 measurements decide them.
+  requested_action_hz: 100
+  requested_state_hz: 100
+  command_valid_for_ms: 100
+  watchdog_timeout_ms: 150
+  target_local_control_hz: 1000
+  use_measured_sustainable_control_rate: true
+
+mapping:
+  order:
+    - left_joint1
+    - left_joint2
+    - left_joint3
+    - left_joint4
+    - left_joint5
+    - left_joint6
+    - left_joint7
+    - left_gripper
+    - right_joint1
+    - right_joint2
+    - right_joint3
+    - right_joint4
+    - right_joint5
+    - right_joint6
+    - right_joint7
+    - right_gripper
+  arm_position_unit: rad
+  arm_velocity_unit: rad_per_s
+  gripper_position_unit: rad
+  gripper_velocity_unit: rad_per_s
+
+hardware_pending_confirmation:
+  leader_right_can: can2
+  leader_left_can: can3
+  follower_right_can: can1
+  follower_left_can: can2
