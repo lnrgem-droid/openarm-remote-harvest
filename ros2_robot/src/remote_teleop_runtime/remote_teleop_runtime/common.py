@@ -15,6 +15,15 @@ STATE_PORT = 50011
 GRIPPER_OPEN_M = 0.044
 GRIPPER_MAX_RAD = -1.0472
 
+# ROS remains strictly local to each computer.  These role-qualified names are
+# a second barrier against accidentally mixing leader feedback with follower
+# feedback if a launch environment is later misconfigured.
+LEADER_JOINT_STATES_TOPIC = "/leader/joint_states"
+FOLLOWER_JOINT_STATES_TOPIC = "/follower/joint_states"
+LEADER_RIGHT_COMMAND_TOPIC = "/leader/right_arm/joint_command"
+FOLLOWER_RIGHT_COMMAND_TOPIC = "/follower/right_arm/joint_command"
+FOLLOWER_DISABLE_SERVICE = "/follower/openarm_gravity_pd/disable"
+
 
 class UnixDatagramClient:
     def __init__(self, server: str):

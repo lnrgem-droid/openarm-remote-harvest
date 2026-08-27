@@ -1,10 +1,21 @@
-openarm_gravity_pd_node:
+/**:
   ros__parameters:
     enable_right: true
     enable_left: false
     right_arm_can: can1
     control_rate: 500.0
+    grav_scale: 0.95
+    kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0]
+    kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4]
+    gripper_kp: 5.0
+    gripper_kd: 1.0
+    gripper_max_rad: -1.0472
     max_joint_vel: [0.15, 0.15, 0.15, 0.15, 0.25, 0.25, 0.25]
     command_interp_s: 0.02
     publish_joint_states: true
     joint_states_rate: 100.0
+    right_command_topic: /follower/right_arm/joint_command
+    left_command_topic: /follower/left_arm/joint_command
+    joint_states_topic: /follower/joint_states
+    disable_service: /follower/openarm_gravity_pd/disable
+    pause_service: /follower/openarm_gravity_pd/pause_command_refresh

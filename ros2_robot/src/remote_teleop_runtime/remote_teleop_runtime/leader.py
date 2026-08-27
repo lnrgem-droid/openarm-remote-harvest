@@ -12,7 +12,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
 from remote_teleop_protocol import ActionCommand, FollowerState, PacketError, decode_message, encode_action
-from .common import ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M, STATE_PORT
+from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
+                     LEADER_JOINT_STATES_TOPIC, STATE_PORT)
 
 
 class LeaderGateway(Node):
@@ -28,7 +29,7 @@ class LeaderGateway(Node):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", STATE_PORT))
         self.sock.setblocking(False)
-        self.create_subscription(JointState, "/joint_states", self.on_joint_state, 1)
+        self.create_subscription(JointState, LEADER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
         self.last_log = time.monotonic()

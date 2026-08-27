@@ -11,11 +11,12 @@ import json
 import os
 import signal
 import socket
+import tempfile
 import time
 
 from remote_teleop_protocol import FaultBits
 
-from .local_protocol import LocalProtocolError, decode_local
+from .local_protocol import LocalProtocolError, decode_local, encode_command
 from .state_machine import SafetyReaction, SafetyStateMachine, TransitionError
 from .watchdog import WatchdogConfig, WatchdogSupervisor
 
@@ -36,6 +37,24 @@ def _snapshot_json(supervisor: WatchdogSupervisor) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _existing_watchdog_is_live(socket_path: str) -> bool:
+    """Return true only if the existing socket answers this watchdog protocol."""
+    probe_path = tempfile.mktemp(prefix="openarm_watchdog_probe_", dir="/tmp")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        probe.bind(probe_path)
+        probe.settimeout(0.1)
+        probe.sendto(encode_command("status"), socket_path)
+        reply = json.loads(probe.recv(4096).decode("utf-8"))
+        return isinstance(reply, dict) and isinstance(reply.get("state"), str)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    finally:
+        probe.close()
+        if os.path.exists(probe_path):
+            os.unlink(probe_path)
 
 
 def main() -> None:
@@ -68,7 +87,11 @@ def main() -> None:
 
     socket_path = os.path.abspath(args.socket)
     if os.path.exists(socket_path):
-        raise RuntimeError(f"refusing to replace existing watchdog socket: {socket_path}")
+        if _existing_watchdog_is_live(socket_path):
+            raise RuntimeError(f"refusing to replace live watchdog socket: {socket_path}")
+        # A Jetson reboot can leave an orphan Unix socket.  It is safe to remove
+        # only after a protocol probe proves that no watchdog owns it.
+        os.unlink(socket_path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     sock.bind(socket_path)
     os.chmod(socket_path, 0o600)
