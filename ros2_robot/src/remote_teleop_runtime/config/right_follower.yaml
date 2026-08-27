@@ -10,8 +10,9 @@
     gripper_kp: 5.0
     gripper_kd: 1.0
     gripper_max_rad: -1.0472
-    # J7 wrist pitch only: a small, bounded increase for responsiveness.
-    max_joint_vel: [0.15, 0.15, 0.15, 0.15, 0.25, 0.25, 0.35]
+    # Faster but still bounded staged-test limits.  The independent 0.20 rad
+    # target-delta clamp remains active in the follower gateway.
+    max_joint_vel: [0.30, 0.30, 0.30, 0.30, 0.40, 0.40, 0.60]
     command_interp_s: 0.02
     publish_joint_states: true
     joint_states_rate: 100.0
