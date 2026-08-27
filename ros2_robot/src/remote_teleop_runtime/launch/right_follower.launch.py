@@ -2,9 +2,11 @@ import os, tempfile
 import xacro
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (DeclareLaunchArgument, LogInfo, OpaqueFunction,
+                            SetEnvironmentVariable, Shutdown, TimerAction)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from remote_teleop_runtime.common import UnixDatagramClient, WATCHDOG_SOCKET, safety_command
 
 def _urdf():
     share = get_package_share_directory("openarm_description")
@@ -13,34 +15,57 @@ def _urdf():
     f.write(doc.toxml()); f.close()
     return f.name, os.path.join(share, "config", "arm", "v10", "joint_limits.yaml")
 
-def _nodes(context):
+def _start_control_stack(context):
     urdf, limits = _urdf()
     pd_share = get_package_share_directory("openarm_gravity_pd_control")
     rt_share = get_package_share_directory("remote_teleop_runtime")
-    verified = LaunchConfiguration("reaction_verified").perform(context).lower() == "true"
     debug_controller = LaunchConfiguration("debug_controller").perform(context).lower() == "true"
-    watchdog_args = []
-    if verified: watchdog_args += ["--verified-reaction", "position_hold"]
+    probe = UnixDatagramClient(WATCHDOG_SOCKET)
+    try:
+        status = safety_command(probe, "status")
+    finally:
+        probe.close()
+    if not status or status.get("state") not in {"INIT", "ALIGNING", "READY", "RUNNING", "FAULT", "E_STOP"}:
+        return [
+            LogInfo(msg="ERROR: follower watchdog did not return a valid health response; control stack was not started."),
+            Shutdown(reason="follower watchdog health gate failed"),
+        ]
     controller_prefix = None
     if debug_controller:
         controller_prefix = "gdb -q --batch -ex run -ex 'thread apply all bt' --args"
     return [
-        Node(package="remote_teleop_follower_safety",
-             executable="remote-teleop-follower-watchdog",
-             arguments=watchdog_args, output="screen"),
         Node(package="openarm_gravity_pd_control", executable="openarm_gravity_pd_node",
              parameters=[os.path.join(pd_share,"config","control_params.yaml"),
                          os.path.join(rt_share,"config","right_follower.yaml"),
                          {"urdf_path":urdf,"joint_limits_path":limits}],
+             name="follower_gravity_pd",
              prefix=controller_prefix, output="screen"),
-        Node(package="remote_teleop_runtime", executable="remote-teleop-follower", output="screen"),
+        Node(package="remote_teleop_runtime", executable="remote-teleop-follower",
+             name="follower_gateway", output="screen"),
     ]
+
+
+def _launch_actions(context):
+    verified = LaunchConfiguration("reaction_verified").perform(context).lower() == "true"
+    watchdog_args = ["--verified-reaction", "position_hold"] if verified else []
+    return [
+        Node(package="remote_teleop_follower_safety",
+             executable="remote-teleop-follower-watchdog",
+             arguments=watchdog_args, output="screen"),
+        # Start CAN control only after the independent watchdog answers a local
+        # status request.  A stale socket or crashed watchdog fails closed.
+        TimerAction(period=1.0, actions=[OpaqueFunction(function=_start_control_stack)]),
+    ]
+
 
 def generate_launch_description():
     return LaunchDescription([
+        # Cross-machine control uses UDP only; do not expose local ROS control
+        # topics, services, or state feedback to the leader host.
+        SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "1"),
         DeclareLaunchArgument("reaction_verified", default_value="false",
             description="Set true only after the supervised command-refresh hold test passes"),
         DeclareLaunchArgument("debug_controller", default_value="false",
             description="Run the controller under gdb and print a backtrace if it exits"),
-        OpaqueFunction(function=_nodes),
+        OpaqueFunction(function=_launch_actions),
     ])

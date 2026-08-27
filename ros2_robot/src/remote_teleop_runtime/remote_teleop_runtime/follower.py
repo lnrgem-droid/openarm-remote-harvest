@@ -18,8 +18,10 @@ from remote_teleop_follower_safety.local_protocol import encode_heartbeat
 from remote_teleop_follower_safety.watchdog import ControllerHeartbeat
 from remote_teleop_protocol import (ActionCommand, ControlState, FollowerState, FaultBits,
                                     PacketError, SequenceTracker, decode_message, encode_state)
-from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M, RUNTIME_SOCKET,
-                     STATE_PORT, UnixDatagramClient, WATCHDOG_SOCKET, safety_command)
+from .common import (ACTION_PORT, FOLLOWER_DISABLE_SERVICE, FOLLOWER_JOINT_STATES_TOPIC,
+                     FOLLOWER_RIGHT_COMMAND_TOPIC, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
+                     RUNTIME_SOCKET, STATE_PORT, UnixDatagramClient, WATCHDOG_SOCKET,
+                     safety_command)
 
 
 class FollowerGateway(Node):
@@ -34,9 +36,9 @@ class FollowerGateway(Node):
         if os.path.exists(RUNTIME_SOCKET): os.unlink(RUNTIME_SOCKET)
         self.command.bind(RUNTIME_SOCKET); os.chmod(RUNTIME_SOCKET, 0o600); self.command.setblocking(False)
         self.watchdog = UnixDatagramClient(WATCHDOG_SOCKET)
-        self.publisher = self.create_publisher(JointState, "/right_arm/joint_command", 1)
-        self.create_subscription(JointState, "/joint_states", self.on_joint_state, 1)
-        self.disable_client = self.create_client(Trigger, "/openarm_gravity_pd/disable")
+        self.publisher = self.create_publisher(JointState, FOLLOWER_RIGHT_COMMAND_TOPIC, 1)
+        self.create_subscription(JointState, FOLLOWER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
+        self.disable_client = self.create_client(Trigger, FOLLOWER_DISABLE_SERVICE)
         self.lock = threading.Lock()
         self.positions = [0.0] * 16; self.velocities = [0.0] * 16
         self.have_feedback = False; self.last_feedback_ns = 0
@@ -165,9 +167,15 @@ class FollowerGateway(Node):
     def runtime_status(self):
         response = dict(self.safety)
         if self.last_target_right is not None:
-            response["max_tracking_error_rad"] = max(
-                abs(target - actual) for target, actual in zip(
-                    self.last_target_right, self.positions[8:15]))
+            errors = [target - actual for target, actual in zip(
+                self.last_target_right, self.positions[8:15])]
+            response["right_target_rad"] = list(self.last_target_right)
+            response["right_actual_rad"] = list(self.positions[8:15])
+            response["right_tracking_error_rad"] = errors
+            response["max_tracking_error_rad"] = max(abs(error) for error in errors)
+        if self.latest_action is not None:
+            response["leader_right_rad"] = list(self.latest_action.right_arm)
+            response["action_age_ms"] = (time.monotonic_ns() - self.last_action_rx_ns) / 1_000_000
         response["relative_follow_reference_captured"] = self.run_leader_right is not None
         return response
 

@@ -90,6 +90,13 @@ public:
     declare_parameter("command_interp_s", 0.02);
     declare_parameter("publish_joint_states", true);
     declare_parameter("joint_states_rate", 100.0);
+    // Role-specific ROS names prevent a leader and follower on the same LAN
+    // from ever consuming each other's feedback or motor commands.
+    declare_parameter("right_command_topic", std::string("/right_arm/joint_command"));
+    declare_parameter("left_command_topic", std::string("/left_arm/joint_command"));
+    declare_parameter("joint_states_topic", std::string("/joint_states"));
+    declare_parameter("disable_service", std::string("/openarm_gravity_pd/disable"));
+    declare_parameter("pause_service", std::string("/openarm_gravity_pd/pause_command_refresh"));
 
     // ── Read parameters ────────────────────────────────────────────────────
     const std::string urdf_path  = get_parameter("urdf_path").as_string();
@@ -102,6 +109,11 @@ public:
     const double joint_states_rate = get_parameter("joint_states_rate").as_double();
     const double control_rate = get_parameter("control_rate").as_double();
     const double command_interp_s = get_parameter("command_interp_s").as_double();
+    const std::string right_command_topic = get_parameter("right_command_topic").as_string();
+    const std::string left_command_topic = get_parameter("left_command_topic").as_string();
+    const std::string joint_states_topic = get_parameter("joint_states_topic").as_string();
+    const std::string disable_service = get_parameter("disable_service").as_string();
+    const std::string pause_service = get_parameter("pause_service").as_string();
 
     if (urdf_path.empty()) {
       RCLCPP_FATAL(get_logger(),
@@ -155,6 +167,8 @@ public:
     RCLCPP_INFO(get_logger(), "Cmd interp     : %.0f ms", command_interp_s * 1000.0);
     RCLCPP_INFO(get_logger(), "Joint states   : %s at %.1f Hz",
       publish_joint_states ? "enabled" : "disabled", joint_states_rate);
+    RCLCPP_INFO(get_logger(), "ROS routes    : state=%s command=%s disable=%s",
+      joint_states_topic.c_str(), right_command_topic.c_str(), disable_service.c_str());
 
     // ── Create arm controllers ─────────────────────────────────────────────
     if (enable_right) {
@@ -179,13 +193,13 @@ public:
     const auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
 
     right_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      "/right_arm/joint_command", command_qos,
+      right_command_topic, command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
         if (right_arm_) right_arm_->setTargetJointState(msg);
       });
 
     left_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      "/left_arm/joint_command", command_qos,
+      left_command_topic, command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
         if (left_arm_) left_arm_->setTargetJointState(msg);
       });
@@ -193,12 +207,12 @@ public:
     if (publish_joint_states && joint_states_rate > 0.0) {
       const auto state_qos = rclcpp::QoS(rclcpp::KeepLast(10));
       joint_state_pub_ =
-        create_publisher<sensor_msgs::msg::JointState>("/joint_states", state_qos);
+        create_publisher<sensor_msgs::msg::JointState>(joint_states_topic, state_qos);
       const auto period = std::chrono::duration<double>(1.0 / joint_states_rate);
       joint_state_timer_ = create_wall_timer(period, [this]() { publishJointStates(); });
     }
     disable_service_ = create_service<std_srvs::srv::Trigger>(
-      "/openarm_gravity_pd/disable",
+      disable_service,
       [this](const std_srvs::srv::Trigger::Request::SharedPtr,
              std_srvs::srv::Trigger::Response::SharedPtr response) {
         disableArms();
@@ -206,7 +220,7 @@ public:
         response->message = "enabled arms disabled; restart required";
       });
     pause_service_ = create_service<std_srvs::srv::SetBool>(
-      "/openarm_gravity_pd/pause_command_refresh",
+      pause_service,
       [this](const std_srvs::srv::SetBool::Request::SharedPtr request,
              std_srvs::srv::SetBool::Response::SharedPtr response) {
         command_refresh_paused_.store(request->data);

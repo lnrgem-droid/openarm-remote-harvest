@@ -2,7 +2,7 @@ import os, tempfile
 import xacro
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -19,11 +19,16 @@ def generate_launch_description():
     rt_share = get_package_share_directory("remote_teleop_runtime")
     peer = LaunchConfiguration("peer")
     return LaunchDescription([
+        # UDP is the only cross-machine transport.  Keeping ROS discovery local
+        # prevents this leader from ever consuming Jetson feedback or commands.
+        SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "1"),
         DeclareLaunchArgument("peer", default_value="192.168.50.2"),
         Node(package="openarm_gravity_pd_control", executable="openarm_gravity_pd_node",
              parameters=[os.path.join(pd_share,"config","control_params.yaml"),
                          os.path.join(rt_share,"config","right_leader.yaml"),
-                         {"urdf_path":urdf,"joint_limits_path":limits}], output="screen"),
+                         {"urdf_path":urdf,"joint_limits_path":limits}],
+             name="leader_gravity_pd", output="screen"),
         Node(package="remote_teleop_runtime", executable="remote-teleop-leader",
-             arguments=["--peer", peer, "--rate", "100"], output="screen"),
+             arguments=["--peer", peer, "--rate", "100"],
+             name="leader_gateway", output="screen"),
     ])
