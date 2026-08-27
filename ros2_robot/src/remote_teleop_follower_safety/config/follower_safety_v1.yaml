@@ -1,0 +1,28 @@
+# Safe development defaults. Production RUN is blocked while reaction_verified=false.
+watchdog:
+  startup_grace_ms: 2000
+  control_process_heartbeat_timeout_ms: 100
+  control_cycle_timeout_ms: 50
+  network_action_timeout_ms: 150
+  max_consecutive_overruns: 5
+  local_socket: /run/openarm/follower_watchdog.sock
+
+safety_reaction:
+  mode: undecided
+  reaction_verified: false
+  # Must remain false until forced-stop, Jetson power-loss, CAN disconnect, and
+  # adapter disconnect tests establish a mechanically safe behavior.
+  hardware_backend_enabled: false
+
+restart_policy:
+  initial_state: ALIGNING
+  automatic_resume: false
+  require_fresh_leader_session: true
+  require_alignment: true
+  require_explicit_run: true
+
+deployment:
+  host_role: jetson_follower
+  follower_right_can: can1
+  follower_left_can: can2
+  can_mapping_physically_confirmed: false
