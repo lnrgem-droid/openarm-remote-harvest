@@ -98,3 +98,14 @@ def test_applied_action_identity_is_consistent():
 def test_action_identity_must_be_nonzero(session_id, sequence):
     with pytest.raises(PacketError, match="greater than zero"):
         ActionCommand(session_id, sequence, 1, (0.0,) * AXIS_COUNT, 1)
+
+
+def test_fault_bit_assignments_are_wire_compatible():
+    assert int(FaultBits.NETWORK_TIMEOUT) == 1
+    assert int(FaultBits.CAN_ERROR) == 2
+    assert int(FaultBits.CONTROL_OVERRUN) == 4
+    assert int(FaultBits.INVALID_COMMAND) == 8
+    assert int(FaultBits.LOCAL_WATCHDOG) == 16
+    assert int(FaultBits.E_STOP_ACTIVE) == 32
+    assert int(FaultBits.CONTROL_PROCESS_TIMEOUT) == 64
+    assert int(FaultBits.CONTROL_CYCLE_TIMEOUT) == 128

@@ -60,6 +60,8 @@ class FaultBits(IntFlag):
     INVALID_COMMAND = 1 << 3
     LOCAL_WATCHDOG = 1 << 4
     E_STOP_ACTIVE = 1 << 5
+    CONTROL_PROCESS_TIMEOUT = 1 << 6
+    CONTROL_CYCLE_TIMEOUT = 1 << 7
 
 
 def _axis_tuple(values: Iterable[float], field: str) -> tuple[float, ...]:

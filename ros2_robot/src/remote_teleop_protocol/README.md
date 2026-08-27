@@ -121,7 +121,9 @@ larger than 1200 bytes.
 Control state values are `0=INIT`, `1=ALIGNING`, `2=READY`, `3=RUNNING`,
 `4=FAULT`, and `5=E_STOP`. Fault bits are bit 0 network timeout, bit 1 CAN
 error, bit 2 control overrun, bit 3 invalid command, bit 4 local watchdog, and
-bit 5 active emergency stop.
+bit 5 active emergency stop. Bit 6 identifies a controller-process heartbeat
+timeout and bit 7 identifies a stale local control cycle while process heartbeats
+continue. Bits 6 and 7 are reported together with the bit 4 watchdog umbrella.
 
 ## Time contract for recording
 
