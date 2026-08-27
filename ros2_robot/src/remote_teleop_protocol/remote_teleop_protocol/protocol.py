@@ -27,9 +27,10 @@ MAX_DATAGRAM_SIZE = 1200
 # payload length, crc32. CRC is calculated with the crc field set to zero.
 _HEADER = struct.Struct("!4sBBHQQQII")
 _ACTION = struct.Struct("!16dQ")
-# obs time, applied-action time, applied sequence, state, fault bits, padding,
+# obs time, applied-action time, applied session, applied sequence, state,
+# fault bits, padding,
 # then 16 positions and 16 velocities.
-_STATE_PREFIX = struct.Struct("!QQQBI3x")
+_STATE_PREFIX = struct.Struct("!QQQQBI3x")
 _STATE_AXES = struct.Struct("!32d")
 
 
@@ -77,6 +78,13 @@ def _uint64(value: int, field: str) -> int:
     return value
 
 
+def _nonzero_uint64(value: int, field: str) -> int:
+    value = _uint64(value, field)
+    if value == 0:
+        raise PacketError(f"{field} must be greater than zero")
+    return value
+
+
 @dataclass(frozen=True)
 class ActionCommand:
     session_id: int
@@ -86,12 +94,14 @@ class ActionCommand:
     valid_for_ns: int
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "session_id", _uint64(self.session_id, "session_id"))
-        object.__setattr__(self, "sequence", _uint64(self.sequence, "sequence"))
+        object.__setattr__(
+            self, "session_id", _nonzero_uint64(self.session_id, "session_id")
+        )
+        object.__setattr__(self, "sequence", _nonzero_uint64(self.sequence, "sequence"))
         object.__setattr__(
             self,
             "sender_monotonic_ns",
-            _uint64(self.sender_monotonic_ns, "sender_monotonic_ns"),
+            _nonzero_uint64(self.sender_monotonic_ns, "sender_monotonic_ns"),
         )
         object.__setattr__(self, "axes", _axis_tuple(self.axes, "axes"))
         object.__setattr__(self, "valid_for_ns", _uint64(self.valid_for_ns, "valid_for_ns"))
@@ -122,6 +132,7 @@ class FollowerState:
     sender_monotonic_ns: int
     obs_timestamp_ns: int
     action_timestamp_ns: int
+    applied_action_session_id: int
     applied_action_sequence: int
     control_state: ControlState
     fault_bits: FaultBits
@@ -129,15 +140,22 @@ class FollowerState:
     velocities: tuple[float, ...]
 
     def __post_init__(self) -> None:
+        for field in ("session_id", "sequence", "sender_monotonic_ns", "obs_timestamp_ns"):
+            object.__setattr__(self, field, _nonzero_uint64(getattr(self, field), field))
         for field in (
-            "session_id",
-            "sequence",
-            "sender_monotonic_ns",
-            "obs_timestamp_ns",
             "action_timestamp_ns",
+            "applied_action_session_id",
             "applied_action_sequence",
         ):
             object.__setattr__(self, field, _uint64(getattr(self, field), field))
+        has_applied_action = self.action_timestamp_ns != 0
+        has_applied_identity = (
+            self.applied_action_session_id != 0 and self.applied_action_sequence != 0
+        )
+        if has_applied_action != has_applied_identity:
+            raise PacketError(
+                "action timestamp, applied session, and applied sequence must all be zero or nonzero"
+            )
         object.__setattr__(self, "control_state", ControlState(self.control_state))
         object.__setattr__(self, "fault_bits", FaultBits(self.fault_bits))
         object.__setattr__(self, "positions", _axis_tuple(self.positions, "positions"))
@@ -192,6 +210,7 @@ def encode_state(state: FollowerState) -> bytes:
     prefix = _STATE_PREFIX.pack(
         state.obs_timestamp_ns,
         state.action_timestamp_ns,
+        state.applied_action_session_id,
         state.applied_action_sequence,
         int(state.control_state),
         int(state.fault_bits),
@@ -245,7 +264,9 @@ def decode_message(datagram: bytes) -> Message:
 
     if len(payload) != _STATE_PREFIX.size + _STATE_AXES.size:
         raise PacketError("invalid FOLLOWER_STATE payload size")
-    obs_ns, action_ns, applied_seq, raw_state, raw_faults = _STATE_PREFIX.unpack_from(payload)
+    obs_ns, action_ns, applied_session, applied_seq, raw_state, raw_faults = (
+        _STATE_PREFIX.unpack_from(payload)
+    )
     axes = _STATE_AXES.unpack_from(payload, _STATE_PREFIX.size)
     try:
         control_state = ControlState(raw_state)
@@ -257,6 +278,7 @@ def decode_message(datagram: bytes) -> Message:
         sender_monotonic_ns=sender_ns,
         obs_timestamp_ns=obs_ns,
         action_timestamp_ns=action_ns,
+        applied_action_session_id=applied_session,
         applied_action_sequence=applied_seq,
         control_state=control_state,
         fault_bits=FaultBits(raw_faults),
@@ -266,20 +288,31 @@ def decode_message(datagram: bytes) -> Message:
 
 
 class SequenceTracker:
-    """Reject duplicate/out-of-order packets while allowing a new sender session."""
+    """Reject duplicate, out-of-order, and unexpected-session packets.
+
+    A caller must explicitly call reset only after its safety state machine has left
+    RUNNING and returned to ALIGNING. This prevents a delayed packet from an old or
+    restarted process from silently replacing the active sender session.
+    """
 
     def __init__(self) -> None:
         self.session_id: int | None = None
         self.last_sequence: int | None = None
 
     def accept(self, session_id: int, sequence: int) -> bool:
-        session_id = _uint64(session_id, "session_id")
-        sequence = _uint64(sequence, "sequence")
-        if session_id != self.session_id:
+        session_id = _nonzero_uint64(session_id, "session_id")
+        sequence = _nonzero_uint64(sequence, "sequence")
+        if self.session_id is None:
             self.session_id = session_id
             self.last_sequence = sequence
             return True
+        if session_id != self.session_id:
+            return False
         if self.last_sequence is not None and sequence <= self.last_sequence:
             return False
         self.last_sequence = sequence
         return True
+
+    def reset(self) -> None:
+        self.session_id = None
+        self.last_sequence = None

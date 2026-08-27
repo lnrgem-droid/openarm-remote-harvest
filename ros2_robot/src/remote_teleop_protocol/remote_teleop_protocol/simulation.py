@@ -40,7 +40,7 @@ def follower_main() -> None:
     parser.add_argument("--duration", type=_nonnegative_float, default=10.0)
     args = parser.parse_args()
 
-    session_id = secrets.randbits(64)
+    session_id = secrets.randbits(64) or 1
     tracker = SequenceTracker()
     received = 0
     invalid = 0
@@ -72,6 +72,7 @@ def follower_main() -> None:
                 sender_monotonic_ns=now_ns,
                 obs_timestamp_ns=now_ns,
                 action_timestamp_ns=0,
+                applied_action_session_id=0,
                 applied_action_sequence=0,
                 control_state=ControlState.ALIGNING,
                 fault_bits=0,
@@ -95,7 +96,7 @@ def leader_main() -> None:
     parser.add_argument("--duration", type=_nonnegative_float, default=5.0)
     args = parser.parse_args()
 
-    session_id = secrets.randbits(64)
+    session_id = secrets.randbits(64) or 1
     period = 1.0 / args.rate
     deadline = time.monotonic() + args.duration
     next_send = time.monotonic()
