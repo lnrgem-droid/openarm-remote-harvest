@@ -34,6 +34,7 @@ def test_state_round_trip():
         sender_monotonic_ns=500,
         obs_timestamp_ns=480,
         action_timestamp_ns=490,
+        applied_action_session_id=7,
         applied_action_sequence=10,
         control_state=ControlState.ALIGNING,
         fault_bits=FaultBits.NETWORK_TIMEOUT | FaultBits.LOCAL_WATCHDOG,
@@ -71,4 +72,29 @@ def test_sequence_tracker_handles_restart_and_reordering():
     assert tracker.accept(100, 2)
     assert not tracker.accept(100, 2)
     assert not tracker.accept(100, 1)
-    assert tracker.accept(200, 0)
+    assert not tracker.accept(200, 1)
+    tracker.reset()
+    assert tracker.accept(200, 1)
+
+
+def test_applied_action_identity_is_consistent():
+    with pytest.raises(PacketError, match="all be zero or nonzero"):
+        FollowerState(
+            session_id=8,
+            sequence=1,
+            sender_monotonic_ns=500,
+            obs_timestamp_ns=480,
+            action_timestamp_ns=490,
+            applied_action_session_id=0,
+            applied_action_sequence=10,
+            control_state=ControlState.READY,
+            fault_bits=FaultBits.NONE,
+            positions=(0.0,) * AXIS_COUNT,
+            velocities=(0.0,) * AXIS_COUNT,
+        )
+
+
+@pytest.mark.parametrize("session_id,sequence", [(0, 1), (1, 0)])
+def test_action_identity_must_be_nonzero(session_id, sequence):
+    with pytest.raises(PacketError, match="greater than zero"):
+        ActionCommand(session_id, sequence, 1, (0.0,) * AXIS_COUNT, 1)

@@ -21,7 +21,6 @@ setup(
     maintainer_email="openarm@todo.todo",
     description="Hardware-independent OpenArm remote teleoperation protocol",
     license="Apache-2.0",
-    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "remote-teleop-sim-leader = remote_teleop_protocol.simulation:leader_main",
