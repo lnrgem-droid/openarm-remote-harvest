@@ -8,7 +8,9 @@ protocol:
   max_datagram_bytes: 1200
 
 network:
+  # x86 host: leader/demo arms only
   leader_ip: 192.168.50.1
+  # Jetson: follower/harvesting arms and all three cameras
   follower_ip: 192.168.50.2
 
 timing:
