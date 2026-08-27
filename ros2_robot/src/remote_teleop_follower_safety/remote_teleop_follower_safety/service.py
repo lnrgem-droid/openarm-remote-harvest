@@ -49,7 +49,11 @@ def main() -> None:
     )
     parser.add_argument("--simulation-verified-reaction", choices=("position_hold",),
                         help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    # When launched through launch_ros.Node, ROS 2 appends `--ros-args` even
+    # though this independent Unix-datagram watchdog has no ROS dependency.
+    # Ignore those transport arguments rather than exiting before supervision
+    # starts.
+    args, _unknown_ros_args = parser.parse_known_args()
 
     reaction = SafetyReaction.UNDECIDED
     verified = False
