@@ -14,6 +14,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml", "README.md"]),
         (join("share", package_name, "config"), glob("config/*.yaml")),
+        (join("share", package_name, "docs"), glob("docs/*.md")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

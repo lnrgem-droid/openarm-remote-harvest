@@ -3,6 +3,25 @@
 This package freezes the first host-to-Jetson interface contract. It contains no
 ROS node, OpenArm driver, CAN access, motor enable, or motion command path.
 
+## Fixed deployment boundary
+
+- The x86 host (`192.168.50.1`) owns only the two **leader/demo arms** operated by
+  the human. Its currently expected CAN mapping is right leader `can2`, left leader
+  `can3`, pending a physical label check before motion.
+- The Jetson (`192.168.50.2`) owns only the two **follower/harvesting arms** that
+  perform mushroom picking. Its currently expected CAN mapping is right follower
+  `can1`, left follower `can2`, pending the same physical label check.
+- The Jetson also exclusively owns all three RGB-D cameras and records follower
+  observations/actions locally. It returns follower state and compressed RGB
+  preview traffic to the x86 host.
+- Action targets travel x86 host to Jetson. The independent watchdog, safety state
+  machine, final action acceptance, and follower CAN writes all run locally on the
+  Jetson; network threads on the host are never a safety mechanism.
+
+The ARM development repository may be edited and reviewed on the x86 host, but its
+runtime target remains the Jetson. Existing single-host bilateral launch scripts do
+not satisfy this deployment contract and must not be used for dual-computer motion.
+
 ## Transport and packet rules
 
 - High-rate action and follower-state traffic uses UDP over the dedicated LAN.
@@ -54,6 +73,56 @@ access are separate deployment requirements.
 Control states are `INIT`, `ALIGNING`, `READY`, `RUNNING`, `FAULT`, and `E_STOP`.
 After every process restart the follower starts outside `RUNNING`.
 
+## Exact wire layout
+
+All offsets are decimal bytes from the start of their section. Unsigned integers
+are `u8/u16/u32/u64`; floats are IEEE-754 `f64`. Multi-byte fields are big-endian.
+
+Every datagram starts with this 40-byte header:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | ASCII magic `OARM` |
+| 4 | 1 | protocol version, `1` |
+| 5 | 1 | message type: `1=ACTION`, `2=FOLLOWER_STATE` |
+| 6 | 2 | flags, must be zero in v1 |
+| 8 | 8 | nonzero sender `session_id` |
+| 16 | 8 | nonzero sender `sequence` |
+| 24 | 8 | sender monotonic timestamp, ns |
+| 32 | 4 | payload byte length |
+| 36 | 4 | CRC32 |
+
+CRC32 is calculated over the complete header with bytes 36..39 set to zero,
+followed by the payload. A receiver rejects wrong magic/version/flags, unknown
+message types, incorrect lengths, CRC mismatch, non-finite floats, and packets
+larger than 1200 bytes.
+
+`ACTION` has a 136-byte payload and a 176-byte total datagram:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 128 | 16 desired positions as `f64`, in the fixed axis order above |
+| 128 | 8 | `valid_for_ns` as nonzero `u64` |
+
+`FOLLOWER_STATE` has a 296-byte payload and a 336-byte total datagram:
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | `obs_timestamp_ns` |
+| 8 | 8 | `action_timestamp_ns`, or zero when none applied |
+| 16 | 8 | `applied_action_session_id`, or zero |
+| 24 | 8 | `applied_action_sequence`, or zero |
+| 32 | 1 | control state |
+| 33 | 4 | fault bit mask |
+| 37 | 3 | zero padding |
+| 40 | 128 | 16 observed positions as `f64` |
+| 168 | 128 | 16 observed velocities as `f64` |
+
+Control state values are `0=INIT`, `1=ALIGNING`, `2=READY`, `3=RUNNING`,
+`4=FAULT`, and `5=E_STOP`. Fault bits are bit 0 network timeout, bit 1 CAN
+error, bit 2 control overrun, bit 3 invalid command, bit 4 local watchdog, and
+bit 5 active emergency stop.
+
 ## Time contract for recording
 
 - `obs_timestamp_ns`: Jetson monotonic time at the actual follower-feedback read.
@@ -67,9 +136,9 @@ After every process restart the follower starts outside `RUNNING`.
   nearest frame. Pairing tolerances are measured in phase 0; over-limit samples are
   marked or dropped, never silently paired.
 
-The camera shared-memory contract will separately define frame number, both
-timestamps, clock domain, dimensions, pixel format, stride, serial number, buffer
-generation, and buffer lifetime before camera recording code is integrated.
+The camera shared-memory metadata and buffer lifetime are frozen separately in
+`docs/CAMERA_FRAME_V1.md`; camera code must implement that contract before recording
+or preview integration.
 
 ## CAN-free simulation
 
