@@ -4,6 +4,8 @@ openarm_gravity_pd_node:
     # can0 = 右臂，can1 = 左臂
     right_arm_can: "can0"
     left_arm_can:  "can1"
+    enable_right: true
+    enable_left: true
 
     # ── URDF 路径 ─────────────────────────────────────────────────────────
     # 启动时由 openarm_description/urdf/robot/v10.urdf.xacro 生成

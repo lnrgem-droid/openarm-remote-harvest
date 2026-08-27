@@ -44,6 +44,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 
 #include "openarm_gravity_pd_control/arm_controller.hpp"
 
@@ -73,6 +75,8 @@ public:
     declare_parameter("joint_limits_path", std::string(""));
     declare_parameter("right_arm_can", std::string("can0"));
     declare_parameter("left_arm_can",  std::string("can1"));
+    declare_parameter("enable_right", true);
+    declare_parameter("enable_left", true);
     declare_parameter("grav_scale",    0.95);
     declare_parameter("kp", std::vector<double>{50.0, 50.0, 50.0, 40.0, 8.0, 8.0, 8.0});
     declare_parameter("kd", std::vector<double>{ 2.0,  2.0,  1.5,  1.5, 0.5, 0.5, 0.4});
@@ -92,6 +96,8 @@ public:
     const std::string joint_limits_path = get_parameter("joint_limits_path").as_string();
     const std::string right_can  = get_parameter("right_arm_can").as_string();
     const std::string left_can   = get_parameter("left_arm_can").as_string();
+    const bool enable_right = get_parameter("enable_right").as_bool();
+    const bool enable_left = get_parameter("enable_left").as_bool();
     const bool publish_joint_states = get_parameter("publish_joint_states").as_bool();
     const double joint_states_rate = get_parameter("joint_states_rate").as_double();
     const double control_rate = get_parameter("control_rate").as_double();
@@ -139,8 +145,8 @@ public:
 
     RCLCPP_INFO(get_logger(), "URDF           : %s", urdf_path.c_str());
     RCLCPP_INFO(get_logger(), "Joint limits   : %s", joint_limits_path.c_str());
-    RCLCPP_INFO(get_logger(), "Right arm      : %s (CAN)", right_can.c_str());
-    RCLCPP_INFO(get_logger(), "Left arm       : %s (CAN)", left_can.c_str());
+    RCLCPP_INFO(get_logger(), "Right arm      : %s", enable_right ? right_can.c_str() : "DISABLED");
+    RCLCPP_INFO(get_logger(), "Left arm       : %s", enable_left ? left_can.c_str() : "DISABLED");
     RCLCPP_INFO(get_logger(), "Grav scale     : %.2f", params.grav_scale);
     RCLCPP_INFO(get_logger(), "Gripper max rad: %.4f rad (%.1f deg)",
       params.gripper_max_rad, params.gripper_max_rad * 180.0 / M_PI);
@@ -151,19 +157,21 @@ public:
       publish_joint_states ? "enabled" : "disabled", joint_states_rate);
 
     // ── Create arm controllers ─────────────────────────────────────────────
-    right_arm_ = std::make_unique<ArmController>(
-      right_can, urdf_path, "openarm_body_link0", "openarm_right_hand",
-      ArmSide::kRight, joint_limits_path, params, get_logger());
-
-    left_arm_ = std::make_unique<ArmController>(
-      left_can,  urdf_path, "openarm_body_link0", "openarm_left_hand",
-      ArmSide::kLeft, joint_limits_path, params, get_logger());
-
-    if (!right_arm_->init()) {
-      RCLCPP_ERROR(get_logger(), "Right arm init failed on %s", right_can.c_str());
+    if (enable_right) {
+      right_arm_ = std::make_unique<ArmController>(
+        right_can, urdf_path, "openarm_body_link0", "openarm_right_hand",
+        ArmSide::kRight, joint_limits_path, params, get_logger());
+      if (!right_arm_->init()) {
+        throw std::runtime_error("right arm init failed on " + right_can);
+      }
     }
-    if (!left_arm_->init()) {
-      RCLCPP_ERROR(get_logger(), "Left arm init failed on %s", left_can.c_str());
+    if (enable_left) {
+      left_arm_ = std::make_unique<ArmController>(
+        left_can, urdf_path, "openarm_body_link0", "openarm_left_hand",
+        ArmSide::kLeft, joint_limits_path, params, get_logger());
+      if (!left_arm_->init()) {
+        throw std::runtime_error("left arm init failed on " + left_can);
+      }
     }
 
     // Teleoperation commands are state targets, not a trajectory queue.
@@ -173,13 +181,13 @@ public:
     right_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/right_arm/joint_command", command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-        right_arm_->setTargetJointState(msg);
+        if (right_arm_) right_arm_->setTargetJointState(msg);
       });
 
     left_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/left_arm/joint_command", command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-        left_arm_->setTargetJointState(msg);
+        if (left_arm_) left_arm_->setTargetJointState(msg);
       });
 
     if (publish_joint_states && joint_states_rate > 0.0) {
@@ -189,6 +197,28 @@ public:
       const auto period = std::chrono::duration<double>(1.0 / joint_states_rate);
       joint_state_timer_ = create_wall_timer(period, [this]() { publishJointStates(); });
     }
+    disable_service_ = create_service<std_srvs::srv::Trigger>(
+      "/openarm_gravity_pd/disable",
+      [this](const std_srvs::srv::Trigger::Request::SharedPtr,
+             std_srvs::srv::Trigger::Response::SharedPtr response) {
+        disableArms();
+        response->success = true;
+        response->message = "enabled arms disabled; restart required";
+      });
+    pause_service_ = create_service<std_srvs::srv::SetBool>(
+      "/openarm_gravity_pd/pause_command_refresh",
+      [this](const std_srvs::srv::SetBool::Request::SharedPtr request,
+             std_srvs::srv::SetBool::Response::SharedPtr response) {
+        command_refresh_paused_.store(request->data);
+        if (request->data) {
+          pause_deadline_ns_.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count() + 1200000000LL);
+        }
+        response->success = true;
+        response->message = request->data ? "MIT command refresh paused; feedback remains active" :
+                                            "MIT command refresh resumed";
+      });
 
     // CAN I/O must not block the ROS executor. Each arm owns one CAN interface,
     // so run them independently at an absolute 500 Hz schedule.
@@ -246,7 +276,12 @@ private:
   {
     auto next = std::chrono::steady_clock::now();
     while (control_running_.load()) {
-      arm->controlStep();
+      if (command_refresh_paused_.load()) {
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now_ns >= pause_deadline_ns_.load()) command_refresh_paused_.store(false);
+      }
+      if (command_refresh_paused_.load()) arm->feedbackOnlyStep(); else arm->controlStep();
       next += std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);
 
       const auto now = std::chrono::steady_clock::now();
@@ -309,10 +344,14 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::TimerBase::SharedPtr joint_state_timer_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disable_service_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr pause_service_;
   std::thread right_control_thread_;
   std::thread left_control_thread_;
   std::atomic<bool> control_running_{false};
   std::atomic<bool> disabled_{false};
+  std::atomic<bool> command_refresh_paused_{false};
+  std::atomic<int64_t> pause_deadline_ns_{0};
 };
 
 int main(int argc, char ** argv)

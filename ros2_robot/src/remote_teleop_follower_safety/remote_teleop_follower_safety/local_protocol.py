@@ -10,7 +10,7 @@ from .watchdog import ControllerHeartbeat
 
 SCHEMA_VERSION = 1
 MAX_LOCAL_DATAGRAM = 4096
-COMMANDS = {"alignment_complete", "request_run", "reset", "estop"}
+COMMANDS = {"alignment_complete", "request_run", "hold", "reset", "estop", "status"}
 
 
 class LocalProtocolError(ValueError):

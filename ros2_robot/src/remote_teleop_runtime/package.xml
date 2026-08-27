@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>remote_teleop_runtime</name>
+  <version>0.1.0</version>
+  <description>ROS2/UDP runtime for staged OpenArm remote teleoperation.</description>
+  <maintainer email="openarm@todo.todo">openarm</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>remote_teleop_protocol</exec_depend>
+  <exec_depend>remote_teleop_follower_safety</exec_depend>
+  <exec_depend>openarm_gravity_pd_control</exec_depend>
+  <exec_depend>openarm_description</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -56,6 +56,8 @@ def generate_launch_description():
         default_value="0.95",
         description="Gravity torque scale factor (< 1.0 avoids upward drift)",
     )
+    enable_right_arg = DeclareLaunchArgument("enable_right", default_value="true")
+    enable_left_arg = DeclareLaunchArgument("enable_left", default_value="true")
     gripper_max_rad_arg = DeclareLaunchArgument(
         "gripper_max_rad",
         default_value="-1.0472",
@@ -115,6 +117,8 @@ def generate_launch_description():
                 "joint_limits_path": joint_limits_path,
                 "right_arm_can":   LaunchConfiguration("right_arm_can"),
                 "left_arm_can":    LaunchConfiguration("left_arm_can"),
+                "enable_right":    LaunchConfiguration("enable_right"),
+                "enable_left":     LaunchConfiguration("enable_left"),
                 "grav_scale":      LaunchConfiguration("grav_scale"),
                 "gripper_max_rad": LaunchConfiguration("gripper_max_rad"),
                 "publish_joint_states": LaunchConfiguration("publish_joint_states"),
@@ -126,6 +130,8 @@ def generate_launch_description():
     return LaunchDescription([
         right_can_arg,
         left_can_arg,
+        enable_right_arg,
+        enable_left_arg,
         grav_scale_arg,
         gripper_max_rad_arg,
         publish_joint_states_arg,

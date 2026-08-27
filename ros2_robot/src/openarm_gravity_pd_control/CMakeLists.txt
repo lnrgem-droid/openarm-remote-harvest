@@ -14,6 +14,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # External C++ dependencies
@@ -102,6 +103,7 @@ target_link_libraries(openarm_gravity_pd_node
 ament_target_dependencies(openarm_gravity_pd_node
   rclcpp
   sensor_msgs
+  std_srvs
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
