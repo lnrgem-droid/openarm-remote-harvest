@@ -459,7 +459,7 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
         std::chrono::duration<double>(now - force_feedback_time_).count() <=
           params_.force_feedback_timeout_s;
       const double raw = fresh ? params_.force_feedback_scale * gripper_force_feedback_target_ : 0.0;
-      const double bounded = std::clamp(raw, -0.08, 0.08);
+      const double bounded = std::clamp(raw, -0.20, 0.20);
       const double alpha = std::clamp(params_.force_feedback_filter_alpha, 0.0, 1.0);
       gripper_force_feedback_filtered_ += alpha * (bounded - gripper_force_feedback_filtered_);
       gripper_haptic = gripper_force_feedback_filtered_;
