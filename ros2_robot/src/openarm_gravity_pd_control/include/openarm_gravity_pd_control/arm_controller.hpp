@@ -55,9 +55,9 @@ struct ArmControlParams {
   /// Reproduces the upstream bilateral controller: while enabled, the leader
   /// tracks the remote follower's actual pose using the original leader gains.
   bool bilateral_position_feedback_enabled = false;
-  std::vector<double> bilateral_kp = {80.0, 80.0, 30.0, 30.0, 10.0, 10.0, 10.0};
-  std::vector<double> bilateral_kd = {2.0, 2.0, 1.5, 1.5, 0.1, 0.1, 0.1};
-  double bilateral_gripper_kp = 4.0;
+  std::vector<double> bilateral_kp = {12.0, 12.0, 8.0, 8.0, 3.0, 3.0, 3.0};
+  std::vector<double> bilateral_kd = {0.8, 0.8, 0.5, 0.5, 0.08, 0.08, 0.08};
+  double bilateral_gripper_kp = 1.5;
   double bilateral_gripper_kd = 0.1;
   /// Physical travel of the gripper motor [rad].
   /// normalized input 1.0 maps to this angle.
