@@ -7,7 +7,9 @@
 # This script deliberately never bypasses the follower watchdog's ALIGNING gate.
 # Both stacks move only to their existing calibrated encoder q=0 reference during
 # startup; after that, ALIGN and RUN are requested only if the watchdog accepts it.
-set -euo pipefail
+# ROS Humble setup scripts themselves read optional variables that may be unset.
+# Enable nounset only after sourcing them.
+set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROS_DIR="$ROOT_DIR/ros2_robot"
@@ -21,6 +23,7 @@ mkdir -p "$LOG_DIR"
 source /opt/ros/humble/setup.bash
 source "$ROS_DIR/install/setup.bash"
 source "$ROS_DIR/install_bimanual/setup.bash"
+set -u
 
 remote_control() {
   local command="$1"
