@@ -91,9 +91,9 @@ public:
     declare_parameter("force_feedback_timeout_s", 0.05);
     declare_parameter("force_feedback_max_torque", std::vector<double>{0.35, 0.35, 0.25, 0.25, 0.15, 0.15, 0.12});
     declare_parameter("bilateral_position_feedback_enabled", false);
-    declare_parameter("bilateral_kp", std::vector<double>{80.0, 80.0, 30.0, 30.0, 10.0, 10.0, 10.0});
-    declare_parameter("bilateral_kd", std::vector<double>{2.0, 2.0, 1.5, 1.5, 0.1, 0.1, 0.1});
-    declare_parameter("bilateral_gripper_kp", 4.0);
+    declare_parameter("bilateral_kp", std::vector<double>{12.0, 12.0, 8.0, 8.0, 3.0, 3.0, 3.0});
+    declare_parameter("bilateral_kd", std::vector<double>{0.8, 0.8, 0.5, 0.5, 0.08, 0.08, 0.08});
+    declare_parameter("bilateral_gripper_kp", 1.5);
     declare_parameter("bilateral_gripper_kd", 0.1);
     declare_parameter("log_interval",     0.0);
     declare_parameter("control_rate",     500.0);

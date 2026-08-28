@@ -41,7 +41,10 @@ class LeaderGateway(Node):
             JointState, LEADER_RIGHT_COMMAND_TOPIC, 1)
         self.left_position_feedback_pub = (self.create_publisher(
             JointState, LEADER_LEFT_COMMAND_TOPIC, 1) if enable_left else None)
+        # Reference pair and short action history let us distinguish genuine
+        # follower contact error from ordinary network transport delay.
         self.bilateral_reference = None
+        self.action_history = {}
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
         self.last_log = time.monotonic()
@@ -67,18 +70,27 @@ class LeaderGateway(Node):
             self.left_force_pub.publish(left)
 
     def publish_position_feedback(self, state: FollowerState):
-        """Mirror upstream bilateral reference exchange without an initial jump."""
+        """Reflect only follower tracking/contact error, never transport lag."""
         if state.control_state.name != "RUNNING" or state.fault_bits:
             self.bilateral_reference = None
             return
         with self.lock:
             leader_now = tuple(self.axes)
+        applied = self.action_history.get(state.applied_action_sequence)
+        if applied is None:
+            return
         if self.bilateral_reference is None:
-            self.bilateral_reference = (leader_now, tuple(state.positions))
+            self.bilateral_reference = (applied, tuple(state.positions))
         leader_zero, follower_zero = self.bilateral_reference
-        target = [leader_ref + (follower_now - follower_ref) for
-                  leader_ref, follower_now, follower_ref in zip(
-                      leader_zero, state.positions, follower_zero)]
+        follower_desired = [follower_ref + (leader_command - leader_ref) for
+                            follower_ref, leader_command, leader_ref in zip(
+                                follower_zero, applied, leader_zero)]
+        # In free space actual≈desired and target≈leader_now, so the master
+        # remains light.  When contact prevents follower motion, the signed
+        # error shifts the master target against the operator's motion.
+        correction_scale = 0.50
+        target = [leader + correction_scale * (actual - desired) for
+                  leader, actual, desired in zip(leader_now, state.positions, follower_desired)]
         right = JointState()
         right.name = [f"openarm_right_joint{i}" for i in range(1, 8)] + ["openarm_right_gripper"]
         right.position = target[8:15] + [max(0.0, min(1.0, target[15] / GRIPPER_MAX_RAD))]
@@ -115,6 +127,9 @@ class LeaderGateway(Node):
         now_ns = time.monotonic_ns()
         msg = ActionCommand(self.session, self.sequence, now_ns, axes, 100_000_000)
         self.sock.sendto(encode_action(msg), (self.peer, ACTION_PORT))
+        self.action_history[self.sequence] = axes
+        if len(self.action_history) > 256:
+            del self.action_history[min(self.action_history)]
         self.sent += 1
         try:
             while True:
