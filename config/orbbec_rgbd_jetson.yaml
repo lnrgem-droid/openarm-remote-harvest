@@ -1,0 +1,5 @@
+# Confirm the two wrist roles with scripts/jetson_orbbec_identify.py before use.
+cameras:
+  left_wrist: {serial: ""}
+  right_wrist: {serial: ""}
+  chest: {serial: "CP3294Y0001E"}

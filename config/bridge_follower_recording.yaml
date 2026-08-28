@@ -1,0 +1,12 @@
+# Overlay for robot_bridge on Jetson.  It observes only the remote follower.
+server:
+  host: "127.0.0.1"
+  port: 9000
+  default_arm_mode: gravity_pd
+startup:
+  default_components: []
+topics:
+  joint_states: /follower/joint_states
+  arm_pd_command:
+    left: /follower/left_arm/joint_command
+    right: /follower/right_arm/joint_command
