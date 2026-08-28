@@ -35,13 +35,20 @@ class OrbbecCamera:
     def start(self) -> None:
         from pyorbbecsdk import (AlignFilter, Config, Context, OBFormat, OBFrameAggregateOutputMode,
                                  OBSensorType, OBStreamType, Pipeline)
-        self.context = Context()
-        devices = self.context.query_devices(); device = None
-        for idx in range(devices.get_count()):
-            candidate = devices.get_device_by_index(idx)
-            if candidate.get_device_info().get_serial_number() == self.spec.serial:
-                device = candidate; break
-        if device is None: raise RuntimeError(f"{self.spec.role}: serial {self.spec.serial} not found")
+        device = None
+        # USB cameras may appear a few seconds after a service restart.
+        for _ in range(20):
+            self.context = Context()
+            devices = self.context.query_devices()
+            for idx in range(devices.get_count()):
+                candidate = devices.get_device_by_index(idx)
+                if candidate.get_device_info().get_serial_number() == self.spec.serial:
+                    device = candidate
+                    break
+            if device is not None:
+                break
+            time.sleep(0.5)
+        if device is None: raise RuntimeError(f"{self.spec.role}: serial {self.spec.serial} not found after USB discovery retry")
         pipe = Pipeline(device); cfg = Config()
         color = pipe.get_stream_profile_list(OBSensorType.COLOR_SENSOR).get_video_stream_profile(
             self.width, self.height, OBFormat.RGB, self.fps)
