@@ -29,11 +29,14 @@ class OrbbecCamera:
         self.spec, self.width, self.height, self.fps = spec, width, height, fps
         self.latest = None; self.lock = threading.Lock(); self.running = False
         self.count = 0; self.dropped = 0; self.thread = None
+        self.context = None
+        self.last_error: str | None = None
 
     def start(self) -> None:
         from pyorbbecsdk import (AlignFilter, Config, Context, OBFormat, OBFrameAggregateOutputMode,
                                  OBSensorType, OBStreamType, Pipeline)
-        ctx = Context(); devices = ctx.query_devices(); device = None
+        self.context = Context()
+        devices = self.context.query_devices(); device = None
         for idx in range(devices.get_count()):
             candidate = devices.get_device_by_index(idx)
             if candidate.get_device_info().get_serial_number() == self.spec.serial:
@@ -61,14 +64,21 @@ class OrbbecCamera:
                     depth_mm = np.rint(raw.astype(np.float32) * dep.get_depth_scale()).clip(0, 65535).astype(np.uint16)[..., None]
                     if rgb_np.shape[:2] != depth_mm.shape[:2]:
                         self.dropped += 1; continue
+                    depth_scale_mm = float(dep.get_depth_scale())
                     header = {"schema_version": 1, "role": self.spec.role, "frame_sequence": self.count,
                               "width": int(rgb_np.shape[1]), "height": int(rgb_np.shape[0]),
                               "aligned_depth_to_rgb": True, "rgb_device_timestamp_us": int(rgb.get_timestamp_us()),
                               "depth_device_timestamp_us": int(dep.get_timestamp_us()),
                               "host_monotonic_ns": time.monotonic_ns(), "host_realtime_ns": time.time_ns(),
-                              "depth_unit": "mm", "rgb_dtype": "uint8", "depth_dtype": "uint16"}
+                              "rgb_format": "rgb8", "depth_unit": "mm", "rgb_dtype": "uint8", "depth_dtype": "uint16",
+                              "rgb_stride_bytes": int(rgb_np.strides[0]), "depth_stride_bytes": int(depth_mm.strides[0]),
+                              "depth_scale_mm_per_unit": depth_scale_mm,
+                              "rgb_depth_pair_delta_us": abs(int(rgb.get_timestamp_us()) - int(dep.get_timestamp_us()))}
                     with self.lock: self.latest = (header, rgb_np, depth_mm)
                     self.count += 1
+            except Exception as exc:
+                self.last_error = repr(exc)
+                LOG.exception("%s capture thread stopped", self.spec.role)
             finally:
                 pipe.stop()
         self.thread = threading.Thread(target=loop, daemon=True, name=f"orbbec-{self.spec.role}")
@@ -110,6 +120,7 @@ def main() -> None:
     preview = ctx.socket(zmq.PUB); preview.setsockopt(zmq.SNDHWM, 1); preview.setsockopt(zmq.LINGER, 0)
     preview.bind(f"tcp://*:{args.preview_port}")
     last_seq = {c.spec.role: -1 for c in cameras}; next_preview = 0.0; sent = 0; report = time.monotonic()
+    report_counts = {c.spec.role: 0 for c in cameras}
     try:
         while True:
             latest = {}
@@ -138,7 +149,21 @@ def main() -> None:
                     except zmq.Again: pass
                 next_preview = now + 1.0 / args.preview_fps
             if now - report >= 2:
-                LOG.info("capture=%s preview=%.1ffps", {c.spec.role: c.count for c in cameras}, sent / (now-report))
+                elapsed = now - report
+                status = {}
+                for camera in cameras:
+                    item = camera.get()
+                    header = item[0] if item else None
+                    age_ms = None if header is None else (time.monotonic_ns() - header["host_monotonic_ns"]) / 1e6
+                    status[camera.spec.role] = {
+                        "rgbd_fps": round((camera.count - report_counts[camera.spec.role]) / elapsed, 1),
+                        "age_ms": None if age_ms is None else round(age_ms, 1),
+                        "pair_us": None if header is None else header["rgb_depth_pair_delta_us"],
+                        "drop": camera.dropped, "healthy": age_ms is not None and age_ms <= 100,
+                        "error": camera.last_error,
+                    }
+                    report_counts[camera.spec.role] = camera.count
+                LOG.info("capture=%s preview_fps=%.1f", status, sent / elapsed)
                 report, sent = now, 0
             time.sleep(0.001)
     except KeyboardInterrupt: pass

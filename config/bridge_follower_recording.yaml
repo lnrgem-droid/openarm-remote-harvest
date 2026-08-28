@@ -1,4 +1,7 @@
-# Overlay for robot_bridge on Jetson.  It observes only the remote follower.
+# Overlay for robot_bridge on Jetson. It observes only the remote follower.
+# `extends` is resolved by robot_bridge/config_loader.py; it retains all
+# protocol/launch defaults while replacing only safe recording-facing fields.
+extends: ../ros2_robot/src/robot_bridge/config/bridge_config.yaml
 server:
   host: "127.0.0.1"
   port: 9000

@@ -41,15 +41,21 @@ JETSON_IP=192.168.50.2 /home/openarm/dev/openarm-rgbd-preview/scripts/start_host
 
 ## LeRobot 录制接入
 
-Jetson 上的 `robot_bridge` 必须使用 `config/bridge_follower_recording.yaml`，只订阅 `/follower/*` 话题。录制时 `OpenArmBridge` 传入：
+Jetson 终端 2 启动只读 bridge。它只订阅 `/follower/*`，不启动 CAN 或控制器：
 
-```text
---robot.control_authority=external
---robot.ws_url=ws://127.0.0.1:9000
---robot.rgbd_endpoint=ipc:///tmp/openarm_rgbd_raw.ipc
+```bash
+/home/nvidia/dev/openarm-rgbd-preview/scripts/start_jetson_follower_record_bridge.sh
 ```
 
-录制器会保存三路 RGB 和三路对齐的 uint16 毫米 Depth。默认后续启动脚本将采用 30 Hz、两 episode 后顺序编码，以避免六路并行编码影响遥操。
+Jetson 终端 3 启动录制。它保留 LeRobot 的 `n/r/q` episode 操作，并以 30 Hz 保存三路 RGB 与三路对齐的 `uint16` 毫米 Depth：
+
+```bash
+DATASET_ID=openarm/mushroom-rgbd \
+DATASET_ROOT=/home/nvidia/datasets/openarm_rgbd \
+/home/nvidia/dev/openarm-rgbd-preview/scripts/record_jetson_rgbd_dataset.sh
+```
+
+录制脚本会在开始前检查 20 GB 的可用空间。视频使用两 episode 后顺序编码，避免一次启动六路编码进程。
 
 ## 安全和资源规则
 

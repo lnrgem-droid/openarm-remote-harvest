@@ -7,7 +7,10 @@ from pyorbbecsdk import Config, Context, OBFormat, OBSensorType, Pipeline
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument("--output-dir", required=True); a=p.parse_args(); os.makedirs(a.output_dir, exist_ok=True)
-    devices=Context().query_devices()
+    # Keep Context alive for the complete lifetime of Device/Pipeline objects.
+    # pyorbbecsdk device handles retain a pointer to its device manager.
+    context = Context()
+    devices = context.query_devices()
     for i in range(devices.get_count()):
         device=devices.get_device_by_index(i); serial=device.get_device_info().get_serial_number(); pipe=Pipeline(device); cfg=Config()
         profile=pipe.get_stream_profile_list(OBSensorType.COLOR_SENSOR).get_video_stream_profile(640,480,OBFormat.RGB,30)
