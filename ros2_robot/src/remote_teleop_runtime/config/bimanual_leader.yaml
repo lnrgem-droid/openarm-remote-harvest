@@ -18,7 +18,7 @@
     gripper_max_rad: -1.0472
     max_joint_vel: [0.30, 0.30, 0.30, 0.30, 0.40, 0.40, 0.60]
     publish_joint_states: true
-    joint_states_rate: 100.0
+    joint_states_rate: 250.0
     right_command_topic: /leader/right_arm/joint_command
     left_command_topic: /leader/left_arm/joint_command
     joint_states_topic: /leader/joint_states

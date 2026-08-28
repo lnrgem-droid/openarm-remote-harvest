@@ -26,7 +26,7 @@ from .common import (ACTION_PORT, FOLLOWER_DISABLE_SERVICE, FOLLOWER_JOINT_STATE
 
 
 class FollowerGateway(Node):
-    def __init__(self, enable_left: bool):
+    def __init__(self, enable_left: bool, rate: float):
         super().__init__("remote_teleop_follower")
         self.session = secrets.randbits(64) or 1
         self.sequence = self.hb_sequence = 0
@@ -60,9 +60,10 @@ class FollowerGateway(Node):
         self.safety = {"state": "ALIGNING", "fault_bits": 0, "reason": "waiting for watchdog"}
         self.safety_rx_ns = 0; self.align_since_ns = 0
         self.applied_session = self.applied_sequence = self.action_timestamp_ns = 0
-        self.create_timer(0.01, self.tick)
+        self.create_timer(1.0 / rate, self.tick)
         arms = "right + left" if enable_left else "right only"
-        self.get_logger().info(f"{arms} follower listening UDP :{ACTION_PORT}")
+        self.get_logger().info(
+            f"{arms} follower listening UDP :{ACTION_PORT} at {rate:.0f} Hz")
 
     @property
     def have_feedback(self):
@@ -134,18 +135,17 @@ class FollowerGateway(Node):
                              self.run_follower_right, remote.right_arm, self.run_leader_right)]
             right_desired = [max(q - 0.20, min(q + 0.20, target))
                              for q, target in zip(right_desired, requested)]
-            right_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0,
-                self.run_follower_gripper +
-                (remote.right_gripper - self.run_leader_gripper)))
+            # A gripper command is an opening fraction, not a shared arm pose.
+            # Use the leader's absolute opening so a closed leader always
+            # closes the follower even if their initial finger openings differ.
+            right_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.right_gripper))
             if self.enable_left and self.run_leader_left is not None:
                 requested = [follower_zero + (leader_now - leader_zero)
                              for follower_zero, leader_now, leader_zero in zip(
                                  self.run_follower_left, remote.left_arm, self.run_leader_left)]
                 left_desired = [max(q - 0.20, min(q + 0.20, target))
                                 for q, target in zip(left_desired, requested)]
-                left_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0,
-                    self.run_follower_left_gripper +
-                    (remote.left_gripper - self.run_leader_left_gripper)))
+                left_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.left_gripper))
             self.applied_session = remote.session_id; self.applied_sequence = remote.sequence
             self.action_timestamp_ns = now_ns
         self.last_target_right = tuple(right_desired)
@@ -268,8 +268,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--enable-left", action="store_true",
                         help="control the left follower arm as well as the default right arm")
+    parser.add_argument("--rate", type=float, default=100.0,
+                        help="UDP receive / command publish rate in Hz")
     args, ros_args = parser.parse_known_args()
-    rclpy.init(args=ros_args); node = FollowerGateway(args.enable_left)
+    if args.rate <= 0.0:
+        parser.error("--rate must be positive")
+    rclpy.init(args=ros_args); node = FollowerGateway(args.enable_left, args.rate)
     try: rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException): pass
     finally:

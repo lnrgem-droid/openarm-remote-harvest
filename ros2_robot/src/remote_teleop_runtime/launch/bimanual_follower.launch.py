@@ -47,7 +47,7 @@ def _start_control_stack(context):
                           "startup_home": startup_home}],
              name="follower_gravity_pd", prefix=controller_prefix, output="screen"),
         Node(package="remote_teleop_runtime", executable="remote-teleop-follower",
-             arguments=["--enable-left"], name="follower_gateway", output="screen"),
+             arguments=["--enable-left", "--rate", "250"], name="follower_gateway", output="screen"),
     ]
 
 
