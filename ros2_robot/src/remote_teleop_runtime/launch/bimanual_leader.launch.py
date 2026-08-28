@@ -38,6 +38,6 @@ def generate_launch_description():
                           "startup_home": startup_home}],
              name="leader_gravity_pd", output="screen"),
         Node(package="remote_teleop_runtime", executable="remote-teleop-leader",
-             arguments=["--peer", peer, "--rate", "100", "--enable-left"],
+             arguments=["--peer", peer, "--rate", "250", "--enable-left"],
              name="leader_gateway", output="screen"),
     ])
