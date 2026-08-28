@@ -1,14 +1,16 @@
 # Remote teleoperation runtime (v1)
 
-The checked-in launch configuration is deliberately **right-arm only**:
+The right-arm launch configuration remains deliberately **right-arm only**.  The
+separate bimanual launch configuration enables both arms after the single-arm
+configuration has been verified:
 
-- x86 leader: `can0`
-- Jetson follower: `can1`
+- x86 leader: right `can0`, left `can1`
+- Jetson follower: right `can1`, left `can2`
 - UDP action/state: `50010/50011`, 100 Hz
 - follower CAN loop: 500 Hz
 - left arm is disabled and is never initialized
 
-Startup holds the measured pose; it never homes automatically. The follower applies
+Startup holds each measured pose; it never homes automatically. The follower applies
 remote targets only while the independent watchdog reports `RUNNING`. `hold`, stale
 action data, stale watchdog permission, and faults all publish the latest measured pose.
 
