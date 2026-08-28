@@ -8,8 +8,11 @@ PYTHON_BIN="${LEROBOT_PYTHON:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
 DATASET_ROOT="${DATASET_ROOT:-/home/nvidia/datasets/openarm_rgbd_$(date +%Y%m%d_%H%M%S)}"
 DATASET_ID="${DATASET_ID:-openarm/mushroom-rgbd}"
 TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
-IMAGE_WRITER_PROCESSES="${IMAGE_WRITER_PROCESSES:-1}"
-IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-2}"
+# Jetson's multiprocessing writer can terminate under the existing Conda/
+# CUDA runtime. Threads stay in the healthy parent process and NVMe handles
+# the six independent image writes in parallel.
+IMAGE_WRITER_PROCESSES="${IMAGE_WRITER_PROCESSES:-0}"
+IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-8}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
 RESET_TIME_S="${RESET_TIME_S:-60}"
 NUM_EPISODES="${NUM_EPISODES:-50}"
