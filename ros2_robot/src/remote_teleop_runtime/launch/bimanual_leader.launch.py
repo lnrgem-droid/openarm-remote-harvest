@@ -29,7 +29,7 @@ def generate_launch_description():
         # UDP is the sole cross-host data transport; ROS control remains local.
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "1"),
         DeclareLaunchArgument("peer", default_value="192.168.50.2"),
-        DeclareLaunchArgument("startup_home", default_value="false",
+        DeclareLaunchArgument("startup_home", default_value="true",
             description="Explicitly move both leader arms to existing encoder q=0 at startup"),
         Node(package="openarm_gravity_pd_control", executable="openarm_gravity_pd_node",
              parameters=[os.path.join(pd_share, "config", "control_params.yaml"),
