@@ -8,6 +8,11 @@ PYTHON_BIN="${LEROBOT_PYTHON:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
 DATASET_ROOT="${DATASET_ROOT:-/home/nvidia/datasets/openarm_rgbd_$(date +%Y%m%d_%H%M%S)}"
 DATASET_ID="${DATASET_ID:-openarm/mushroom-rgbd}"
 TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
+IMAGE_WRITER_PROCESSES="${IMAGE_WRITER_PROCESSES:-1}"
+IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-2}"
+EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
+RESET_TIME_S="${RESET_TIME_S:-60}"
+NUM_EPISODES="${NUM_EPISODES:-50}"
 
 DATASET_PARENT=$(dirname "$DATASET_ROOT")
 mkdir -p "$DATASET_PARENT"
@@ -32,10 +37,12 @@ exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --dataset.repo_id="$DATASET_ID" \
   --dataset.root="$DATASET_ROOT" \
   --dataset.single_task="$TASK" \
-  --dataset.fps=30 --dataset.video=true --dataset.push_to_hub=false \
+  --dataset.fps=30 --dataset.episode_time_s="$EPISODE_TIME_S" \
+  --dataset.reset_time_s="$RESET_TIME_S" --dataset.num_episodes="$NUM_EPISODES" \
+  --dataset.video=true --dataset.push_to_hub=false \
   --dataset.streaming_encoding=false --dataset.video_encoding_batch_size=2 \
-  --dataset.num_image_writer_processes=0 \
-  --dataset.num_image_writer_threads_per_camera=1 \
+  --dataset.num_image_writer_processes="$IMAGE_WRITER_PROCESSES" \
+  --dataset.num_image_writer_threads_per_camera="$IMAGE_WRITER_THREADS" \
   --dataset.encoder_threads=2 \
   --dataset.rgb_encoder.vcodec=h264 --dataset.rgb_encoder.pix_fmt=yuv420p \
   --dataset.rgb_encoder.crf=23 --dataset.rgb_encoder.preset=veryfast \
