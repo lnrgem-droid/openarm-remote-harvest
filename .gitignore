@@ -1,3 +1,59 @@
-# Local commissioning snapshots and runtime sidecars are not source artifacts.
+# Caches & tools
+.ruff_cache/
+.uv-cache/
+.uv-tools/
+.test-calibration/
+.cache/
+.mypy_cache/
+.pytest_cache/
+
+# Python envs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ROS 2 build artifacts
+build/
+install/
+log/
+ros2_robot/build/
+ros2_robot/install/
+ros2_robot/log/
+ros2_robot/build_*/
+ros2_robot/install_*/
+ros2_robot/log_*/
+
+# Large binary installers
+*.deb
+*.apk
+
+# Runtime / local outputs
+/outputs/
+/datasets/
+/data/
+/recordings/
+/checkpoints/
+*.log
 artifacts/
 *.jsonl
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+*token*.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+ros2_arms/.git.bak_ros2_arms_remote/
