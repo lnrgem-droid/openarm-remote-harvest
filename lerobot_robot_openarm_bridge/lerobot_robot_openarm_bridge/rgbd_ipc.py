@@ -28,7 +28,7 @@ class RGBDHub:
         self._thread: threading.Thread | None = None
         self._socket = self._ctx = None
 
-    def connect(self) -> None:
+    def connect(self, startup_timeout_s: float = 3.0) -> None:
         import zmq
         self._ctx = zmq.Context(); self._socket = self._ctx.socket(zmq.SUB)
         self._socket.setsockopt(zmq.RCVHWM, 2)
@@ -37,6 +37,21 @@ class RGBDHub:
         self._socket.connect(self.endpoint); self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="openarm-rgbd-ipc")
         self._thread.start()
+        # ZMQ subscriptions are asynchronous.  Do not let LeRobot begin an
+        # episode before every camera has supplied one fresh atomic RGB-D pair.
+        deadline = time.monotonic() + startup_timeout_s
+        while time.monotonic() < deadline:
+            with self._lock:
+                ready = all(role in self._frames for role in self.roles)
+            if ready:
+                return
+            time.sleep(0.01)
+        self.disconnect()
+        raise TimeoutError(f"RGB-D startup timed out; missing roles: {self._missing_roles()}")
+
+    def _missing_roles(self) -> list[str]:
+        with self._lock:
+            return [role for role in self.roles if role not in self._frames]
 
     @property
     def is_connected(self) -> bool:
