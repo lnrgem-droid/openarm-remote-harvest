@@ -6,6 +6,10 @@
     right_arm_can: can0
     left_arm_can: can1
     control_rate: 500.0
+    # Startup home is invoked only by the explicit launch argument.  A 0.06 rad
+    # completion tolerance matches measured gravity-compensated settling error.
+    startup_home_tolerance_rad: 0.06
+    startup_home_timeout_s: 15.0
     kp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     kd: [0.4, 0.4, 0.3, 0.3, 0.15, 0.15, 0.15]
     gripper_kp: 0.0

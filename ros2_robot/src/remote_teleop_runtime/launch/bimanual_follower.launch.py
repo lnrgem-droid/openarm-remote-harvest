@@ -58,7 +58,7 @@ def _launch_actions(context):
     # Two arms initialize and home sequentially, so the normal 2 s liveness
     # grace would fault before the controller can send its first heartbeat.
     if startup_home:
-        watchdog_args += ["--startup-grace-s", "15"]
+        watchdog_args += ["--startup-grace-s", "35"]
     return [
         Node(package="remote_teleop_follower_safety",
              executable="remote-teleop-follower-watchdog",
