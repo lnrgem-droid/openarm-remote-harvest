@@ -35,6 +35,7 @@ ros2_robot/log_*/
 /data/
 /recordings/
 /checkpoints/
+/runtime/
 *.log
 artifacts/
 *.jsonl
