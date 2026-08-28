@@ -22,3 +22,18 @@ controller disable service.
 
 Launch commands and the supervised physical sequence are documented in
 `docs/RIGHT_ARM_REAL_TEST.md` at the repository root.
+
+## One-command dual-machine startup
+
+After both host and Jetson workspaces have been built from the same release,
+run this **on the host**:
+
+```bash
+/home/openarm/dev/openarm-remote-harvest/scripts/run_bimanual_remote_feedback.sh
+```
+
+The script starts the Jetson follower stack through SSH, returns both pairs to
+their existing calibrated encoder `q=0` references, waits for live UDP traffic,
+then requests `align` and `run`. It never relaxes the watchdog alignment gate:
+if alignment is rejected, no teleoperation starts. `Ctrl+C` sends `hold`; only
+after an operator supports the arms should `disable` be issued on the Jetson.
