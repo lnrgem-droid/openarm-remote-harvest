@@ -21,6 +21,7 @@ GRIPPER_MAX_RAD = -1.0472
 LEADER_JOINT_STATES_TOPIC = "/leader/joint_states"
 FOLLOWER_JOINT_STATES_TOPIC = "/follower/joint_states"
 LEADER_RIGHT_COMMAND_TOPIC = "/leader/right_arm/joint_command"
+LEADER_LEFT_COMMAND_TOPIC = "/leader/left_arm/joint_command"
 LEADER_RIGHT_FORCE_FEEDBACK_TOPIC = "/leader/right_arm/force_feedback"
 LEADER_LEFT_FORCE_FEEDBACK_TOPIC = "/leader/left_arm/force_feedback"
 FOLLOWER_RIGHT_COMMAND_TOPIC = "/follower/right_arm/joint_command"

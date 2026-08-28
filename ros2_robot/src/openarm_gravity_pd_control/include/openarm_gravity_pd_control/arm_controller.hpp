@@ -52,6 +52,13 @@ struct ArmControlParams {
   double force_feedback_filter_alpha = 0.10;
   double force_feedback_timeout_s = 0.05;
   std::vector<double> force_feedback_max_torque = {0.35, 0.35, 0.25, 0.25, 0.15, 0.15, 0.12};
+  /// Reproduces the upstream bilateral controller: while enabled, the leader
+  /// tracks the remote follower's actual pose using the original leader gains.
+  bool bilateral_position_feedback_enabled = false;
+  std::vector<double> bilateral_kp = {80.0, 80.0, 30.0, 30.0, 10.0, 10.0, 10.0};
+  std::vector<double> bilateral_kd = {2.0, 2.0, 1.5, 1.5, 0.1, 0.1, 0.1};
+  double bilateral_gripper_kp = 4.0;
+  double bilateral_gripper_kd = 0.1;
   /// Physical travel of the gripper motor [rad].
   /// normalized input 1.0 maps to this angle.
   /// Set to the actual hardware limit to avoid hitting end stops.

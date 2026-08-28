@@ -13,7 +13,8 @@ from sensor_msgs.msg import JointState
 
 from remote_teleop_protocol import ActionCommand, FollowerState, PacketError, decode_message, encode_action
 from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
-                     LEADER_JOINT_STATES_TOPIC, LEADER_LEFT_FORCE_FEEDBACK_TOPIC,
+                     LEADER_JOINT_STATES_TOPIC, LEADER_LEFT_COMMAND_TOPIC,
+                     LEADER_LEFT_FORCE_FEEDBACK_TOPIC, LEADER_RIGHT_COMMAND_TOPIC,
                      LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, STATE_PORT)
 
 
@@ -36,6 +37,11 @@ class LeaderGateway(Node):
         self.right_force_pub = self.create_publisher(JointState, LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, 1)
         self.left_force_pub = (self.create_publisher(JointState, LEADER_LEFT_FORCE_FEEDBACK_TOPIC, 1)
                                if enable_left else None)
+        self.right_position_feedback_pub = self.create_publisher(
+            JointState, LEADER_RIGHT_COMMAND_TOPIC, 1)
+        self.left_position_feedback_pub = (self.create_publisher(
+            JointState, LEADER_LEFT_COMMAND_TOPIC, 1) if enable_left else None)
+        self.bilateral_reference = None
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
         self.last_log = time.monotonic()
@@ -59,6 +65,29 @@ class LeaderGateway(Node):
         if self.enable_left:
             left = JointState(); left.effort = left_efforts
             self.left_force_pub.publish(left)
+
+    def publish_position_feedback(self, state: FollowerState):
+        """Mirror upstream bilateral reference exchange without an initial jump."""
+        if state.control_state.name != "RUNNING" or state.fault_bits:
+            self.bilateral_reference = None
+            return
+        with self.lock:
+            leader_now = tuple(self.axes)
+        if self.bilateral_reference is None:
+            self.bilateral_reference = (leader_now, tuple(state.positions))
+        leader_zero, follower_zero = self.bilateral_reference
+        target = [leader_ref + (follower_now - follower_ref) for
+                  leader_ref, follower_now, follower_ref in zip(
+                      leader_zero, state.positions, follower_zero)]
+        right = JointState()
+        right.name = [f"openarm_right_joint{i}" for i in range(1, 8)] + ["openarm_right_gripper"]
+        right.position = target[8:15] + [max(0.0, min(1.0, target[15] / GRIPPER_MAX_RAD))]
+        self.right_position_feedback_pub.publish(right)
+        if self.enable_left:
+            left = JointState()
+            left.name = [f"openarm_left_joint{i}" for i in range(1, 8)] + ["openarm_left_gripper"]
+            left.position = target[0:7] + [max(0.0, min(1.0, target[7] / GRIPPER_MAX_RAD))]
+            self.left_position_feedback_pub.publish(left)
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position))
@@ -94,6 +123,7 @@ class LeaderGateway(Node):
                 if isinstance(state, FollowerState):
                     self.received += 1
                     self.publish_force_feedback(state)
+                    self.publish_position_feedback(state)
         except BlockingIOError:
             pass
         except PacketError:

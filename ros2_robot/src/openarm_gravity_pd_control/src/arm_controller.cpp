@@ -426,8 +426,10 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   arm_cmds.reserve(n);
   std::vector<double> interaction_effort(n, 0.0);
   for (size_t i = 0; i < n; ++i) {
-    const auto & active_kp = direct_target ? params_.startup_home_kp : params_.kp;
-    const auto & active_kd = direct_target ? params_.startup_home_kd : params_.kd;
+    const auto & active_kp = direct_target ? params_.startup_home_kp :
+      (params_.bilateral_position_feedback_enabled ? params_.bilateral_kp : params_.kp);
+    const auto & active_kd = direct_target ? params_.startup_home_kd :
+      (params_.bilateral_position_feedback_enabled ? params_.bilateral_kd : params_.kd);
     const double kp = (i < active_kp.size()) ? active_kp[i] : 10.0;
     const double kd = (i < active_kd.size()) ? active_kd[i] : 0.5;
     const double commanded_torque =
@@ -462,8 +464,12 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       gripper_force_feedback_filtered_ += alpha * (bounded - gripper_force_feedback_filtered_);
       gripper_haptic = gripper_force_feedback_filtered_;
     }
+    const double gripper_kp = params_.bilateral_position_feedback_enabled ?
+      params_.bilateral_gripper_kp : params_.gripper_kp;
+    const double gripper_kd = params_.bilateral_position_feedback_enabled ?
+      params_.bilateral_gripper_kd : params_.gripper_kd;
     openarm_->get_gripper().mit_control_all(
-      {{params_.gripper_kp, params_.gripper_kd, gripper_rad, 0.0, gripper_haptic}});
+      {{gripper_kp, gripper_kd, gripper_rad, 0.0, gripper_haptic}});
   }
 
   openarm_->recv_all();

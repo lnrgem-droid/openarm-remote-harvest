@@ -90,6 +90,11 @@ public:
     declare_parameter("force_feedback_filter_alpha", 0.10);
     declare_parameter("force_feedback_timeout_s", 0.05);
     declare_parameter("force_feedback_max_torque", std::vector<double>{0.35, 0.35, 0.25, 0.25, 0.15, 0.15, 0.12});
+    declare_parameter("bilateral_position_feedback_enabled", false);
+    declare_parameter("bilateral_kp", std::vector<double>{80.0, 80.0, 30.0, 30.0, 10.0, 10.0, 10.0});
+    declare_parameter("bilateral_kd", std::vector<double>{2.0, 2.0, 1.5, 1.5, 0.1, 0.1, 0.1});
+    declare_parameter("bilateral_gripper_kp", 4.0);
+    declare_parameter("bilateral_gripper_kd", 0.1);
     declare_parameter("log_interval",     0.0);
     declare_parameter("control_rate",     500.0);
     declare_parameter("command_interp_s", 0.02);
@@ -174,6 +179,11 @@ public:
     params.force_feedback_filter_alpha = get_parameter("force_feedback_filter_alpha").as_double();
     params.force_feedback_timeout_s = get_parameter("force_feedback_timeout_s").as_double();
     params.force_feedback_max_torque = get_parameter("force_feedback_max_torque").as_double_array();
+    params.bilateral_position_feedback_enabled = get_parameter("bilateral_position_feedback_enabled").as_bool();
+    params.bilateral_kp = get_parameter("bilateral_kp").as_double_array();
+    params.bilateral_kd = get_parameter("bilateral_kd").as_double_array();
+    params.bilateral_gripper_kp = get_parameter("bilateral_gripper_kp").as_double();
+    params.bilateral_gripper_kd = get_parameter("bilateral_gripper_kd").as_double();
     params.log_interval_s  = get_parameter("log_interval").as_double();
     params.control_dt      = 1.0 / control_rate;
     params.command_interp_s = command_interp_s;
@@ -194,6 +204,10 @@ public:
         params.force_feedback_filter_alpha < 0.0 || params.force_feedback_filter_alpha > 1.0 ||
         params.force_feedback_timeout_s <= 0.0) {
       throw std::invalid_argument("invalid force feedback parameters");
+    }
+    if (params.bilateral_kp.size() != 7 || params.bilateral_kd.size() != 7 ||
+        params.bilateral_gripper_kp < 0.0 || params.bilateral_gripper_kd < 0.0) {
+      throw std::invalid_argument("invalid bilateral position feedback parameters");
     }
     for (double velocity : params.max_joint_vel) {
       if (!(velocity > 0.0)) {
