@@ -31,7 +31,10 @@ class RGBDHub:
     def connect(self, startup_timeout_s: float = 3.0) -> None:
         import zmq
         self._ctx = zmq.Context(); self._socket = self._ctx.socket(zmq.SUB)
-        self._socket.setsockopt(zmq.RCVHWM, 2)
+        # Three 30 Hz cameras arrive as independent publications. Keep a
+        # short complete set, then drain to latest below; an HWM of two can
+        # systematically starve the third role under scheduler contention.
+        self._socket.setsockopt(zmq.RCVHWM, 12)
         for role in self.roles:
             self._socket.setsockopt(zmq.SUBSCRIBE, f"rgbd/{role}".encode())
         self._socket.connect(self.endpoint); self._running = True

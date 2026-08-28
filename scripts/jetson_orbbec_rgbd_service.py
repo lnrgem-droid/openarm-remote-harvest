@@ -116,7 +116,7 @@ def main() -> None:
     os.makedirs(args.metadata_dir, exist_ok=True)
     metadata = {camera.spec.role: open(os.path.join(args.metadata_dir, f"{camera.spec.role}.jsonl"), "a", buffering=1)
                 for camera in cameras}
-    ctx = zmq.Context(); raw = ctx.socket(zmq.PUB); raw.setsockopt(zmq.SNDHWM, 2); raw.bind(args.ipc)
+    ctx = zmq.Context(); raw = ctx.socket(zmq.PUB); raw.setsockopt(zmq.SNDHWM, 12); raw.bind(args.ipc)
     preview = ctx.socket(zmq.PUB); preview.setsockopt(zmq.SNDHWM, 1); preview.setsockopt(zmq.LINGER, 0)
     preview.bind(f"tcp://*:{args.preview_port}")
     last_seq = {c.spec.role: -1 for c in cameras}; next_preview = 0.0; sent = 0; report = time.monotonic()
