@@ -53,7 +53,15 @@ class Recorder:
         stamp = time.strftime("%Y%m%d_%H%M%S")
         self.dataset_root = f"/home/nvidia/datasets/openarm_rgbd_{stamp}"
         master, slave = pty.openpty()
-        env = os.environ | {"DATASET_ID": "openarm/mushroom-rgbd", "DATASET_ROOT": self.dataset_root}
+        plugin_root = str(self.root / "lerobot_robot_openarm_bridge")
+        python_path = os.environ.get("PYTHONPATH", "")
+        env = os.environ | {
+            "DATASET_ID": "openarm/mushroom-rgbd",
+            "DATASET_ROOT": self.dataset_root,
+            # LeRobot discovers locally developed robot types from import
+            # paths. Make this explicit for manager-spawned (non-shell) jobs.
+            "PYTHONPATH": plugin_root + (":" + python_path if python_path else ""),
+        }
         command = [str(self.root / "scripts" / "record_jetson_rgbd_dataset.sh")]
         self.process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                                         cwd=self.root, env=env, start_new_session=True)
