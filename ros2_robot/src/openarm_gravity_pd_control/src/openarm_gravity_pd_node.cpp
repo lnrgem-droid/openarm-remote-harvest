@@ -88,6 +88,8 @@ public:
     declare_parameter("log_interval",     0.0);
     declare_parameter("control_rate",     500.0);
     declare_parameter("command_interp_s", 0.02);
+    declare_parameter("startup_home", false);
+    declare_parameter("startup_home_duration_s", 2.0);
     declare_parameter("publish_joint_states", true);
     declare_parameter("joint_states_rate", 100.0);
     // Role-specific ROS names prevent a leader and follower on the same LAN
@@ -109,6 +111,9 @@ public:
     const double joint_states_rate = get_parameter("joint_states_rate").as_double();
     const double control_rate = get_parameter("control_rate").as_double();
     const double command_interp_s = get_parameter("command_interp_s").as_double();
+    const bool startup_home = get_parameter("startup_home").as_bool();
+    const double startup_home_duration_s =
+      get_parameter("startup_home_duration_s").as_double();
     const std::string right_command_topic = get_parameter("right_command_topic").as_string();
     const std::string left_command_topic = get_parameter("left_command_topic").as_string();
     const std::string joint_states_topic = get_parameter("joint_states_topic").as_string();
@@ -133,6 +138,9 @@ public:
     if (command_interp_s < 0.0) {
       throw std::invalid_argument("command_interp_s must be >= 0");
     }
+    if (!(startup_home_duration_s > 0.0)) {
+      throw std::invalid_argument("startup_home_duration_s must be positive");
+    }
 
     ArmControlParams params;
     params.kp             = get_parameter("kp").as_double_array();
@@ -145,6 +153,8 @@ public:
     params.log_interval_s  = get_parameter("log_interval").as_double();
     params.control_dt      = 1.0 / control_rate;
     params.command_interp_s = command_interp_s;
+    params.startup_home = startup_home;
+    params.startup_home_duration_s = startup_home_duration_s;
 
     if (params.max_joint_vel.size() != 7) {
       throw std::invalid_argument("max_joint_vel must contain 7 values");
@@ -165,6 +175,8 @@ public:
     RCLCPP_INFO(get_logger(), "Log interval   : %.1f s", params.log_interval_s);
     RCLCPP_INFO(get_logger(), "Control rate   : %.0f Hz", control_rate);
     RCLCPP_INFO(get_logger(), "Cmd interp     : %.0f ms", command_interp_s * 1000.0);
+    RCLCPP_WARN(get_logger(), "Startup home   : %s%s", startup_home ? "ENABLED (moves to encoder q=0)" : "disabled (hold measured pose)",
+      startup_home ? "" : "");
     RCLCPP_INFO(get_logger(), "Joint states   : %s at %.1f Hz",
       publish_joint_states ? "enabled" : "disabled", joint_states_rate);
     RCLCPP_INFO(get_logger(), "ROS routes    : state=%s command=%s disable=%s",

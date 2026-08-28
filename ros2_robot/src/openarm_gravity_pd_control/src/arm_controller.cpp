@@ -182,6 +182,14 @@ bool ArmController::init()
   }
   new_target_pending_ = true;
 
+  // This is deliberately not a motor "set zero" operation.  It reproduces
+  // the upstream controlled homing behaviour by travelling to the already
+  // calibrated encoder q=0 pose, while retaining the current gripper opening.
+  // It is opt-in because it causes physical motion during startup.
+  if (params_.startup_home) {
+    homeToZeroInterpolated(params_.startup_home_duration_s);
+  }
+
   std::cout << "[ArmController][" << can_interface_ << "] Ready." << std::endl;
   return true;
 }
@@ -410,6 +418,43 @@ void ArmController::applyPositionLimits(std::vector<double> & positions) const
   for (size_t i = 0; i < std::min(positions.size(), ARM_DOF); ++i) {
     positions[i] = std::clamp(positions[i], pos_min_[i], pos_max_[i]);
   }
+}
+
+void ArmController::homeToZeroInterpolated(double duration_s)
+{
+  openarm_->refresh_all();
+  openarm_->recv_all();
+
+  const auto & arm_motors = openarm_->get_arm().get_motors();
+  std::vector<double> start_q(ARM_DOF, 0.0);
+  std::vector<double> home_target(ARM_DOF, 0.0);
+  for (size_t i = 0; i < std::min(arm_motors.size(), ARM_DOF); ++i) {
+    start_q[i] = arm_motors[i].get_position();
+  }
+
+  RCLCPP_WARN(logger_, "Startup homing to existing encoder q=0 over %.1f s; motor zero offsets are unchanged.",
+    duration_s);
+  const auto t0 = std::chrono::steady_clock::now();
+  while (true) {
+    const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double alpha = std::min(elapsed / duration_s, 1.0);
+    for (size_t i = 0; i < ARM_DOF; ++i) {
+      home_target[i] = start_q[i] * (1.0 - alpha);
+    }
+    applyPositionLimits(home_target);
+    executeControlStep(&home_target);
+    if (alpha >= 1.0) {
+      break;
+    }
+    const auto sleep_ms = std::max(
+      1, static_cast<int>(std::lround(params_.control_dt * 1000.0)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+  }
+  std::lock_guard<std::mutex> lock(target_mutex_);
+  target_positions_ = home_target;
+  new_target_pending_ = true;
+  RCLCPP_WARN(logger_, "Startup homing complete.");
 }
 
 }  // namespace openarm_gravity_pd_control
