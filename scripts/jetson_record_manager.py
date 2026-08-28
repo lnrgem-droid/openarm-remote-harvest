@@ -26,6 +26,7 @@ class Recorder:
         self.started: float | None = None
         self.last_log = "idle"
         self.dataset_root: str | None = None
+        self.log_path = Path("/home/nvidia/openarm-rgbd-runtime/record-last.log")
 
     def status(self) -> dict:
         running = self.process is not None and self.process.poll() is None
@@ -41,6 +42,9 @@ class Recorder:
             except OSError:
                 break
             self.last_log = (self.last_log + chunk)[-4000:]
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as log:
+                log.write(chunk)
 
     def start(self) -> dict:
         self._drain()
@@ -54,6 +58,8 @@ class Recorder:
         self.process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                                         cwd=self.root, env=env, start_new_session=True)
         os.close(slave)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text("", encoding="utf-8")
         self.pty_master, self.started, self.last_log = master, time.time(), "starting"
         return {"ok": True, **self.status()}
 
