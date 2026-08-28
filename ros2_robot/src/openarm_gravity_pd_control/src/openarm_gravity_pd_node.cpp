@@ -85,6 +85,11 @@ public:
     declare_parameter("gripper_kp",      16.0);
     declare_parameter("gripper_kd",       0.2);
     declare_parameter("gripper_max_rad",  3.14159265358979);
+    declare_parameter("force_feedback_enabled", false);
+    declare_parameter("force_feedback_scale", 0.15);
+    declare_parameter("force_feedback_filter_alpha", 0.10);
+    declare_parameter("force_feedback_timeout_s", 0.05);
+    declare_parameter("force_feedback_max_torque", std::vector<double>{0.35, 0.35, 0.25, 0.25, 0.15, 0.15, 0.12});
     declare_parameter("log_interval",     0.0);
     declare_parameter("control_rate",     500.0);
     declare_parameter("command_interp_s", 0.02);
@@ -100,6 +105,8 @@ public:
     // from ever consuming each other's feedback or motor commands.
     declare_parameter("right_command_topic", std::string("/right_arm/joint_command"));
     declare_parameter("left_command_topic", std::string("/left_arm/joint_command"));
+    declare_parameter("right_force_feedback_topic", std::string("/right_arm/force_feedback"));
+    declare_parameter("left_force_feedback_topic", std::string("/left_arm/force_feedback"));
     declare_parameter("joint_states_topic", std::string("/joint_states"));
     declare_parameter("disable_service", std::string("/openarm_gravity_pd/disable"));
     declare_parameter("pause_service", std::string("/openarm_gravity_pd/pause_command_refresh"));
@@ -124,6 +131,8 @@ public:
       get_parameter("startup_home_tolerance_rad").as_double();
     const std::string right_command_topic = get_parameter("right_command_topic").as_string();
     const std::string left_command_topic = get_parameter("left_command_topic").as_string();
+    const std::string right_force_feedback_topic = get_parameter("right_force_feedback_topic").as_string();
+    const std::string left_force_feedback_topic = get_parameter("left_force_feedback_topic").as_string();
     const std::string joint_states_topic = get_parameter("joint_states_topic").as_string();
     const std::string disable_service = get_parameter("disable_service").as_string();
     const std::string pause_service = get_parameter("pause_service").as_string();
@@ -160,6 +169,11 @@ public:
     params.gripper_kp      = get_parameter("gripper_kp").as_double();
     params.gripper_kd      = get_parameter("gripper_kd").as_double();
     params.gripper_max_rad = get_parameter("gripper_max_rad").as_double();
+    params.force_feedback_enabled = get_parameter("force_feedback_enabled").as_bool();
+    params.force_feedback_scale = get_parameter("force_feedback_scale").as_double();
+    params.force_feedback_filter_alpha = get_parameter("force_feedback_filter_alpha").as_double();
+    params.force_feedback_timeout_s = get_parameter("force_feedback_timeout_s").as_double();
+    params.force_feedback_max_torque = get_parameter("force_feedback_max_torque").as_double_array();
     params.log_interval_s  = get_parameter("log_interval").as_double();
     params.control_dt      = 1.0 / control_rate;
     params.command_interp_s = command_interp_s;
@@ -175,6 +189,11 @@ public:
     }
     if (params.startup_home_kp.size() != 7 || params.startup_home_kd.size() != 7) {
       throw std::invalid_argument("startup_home_kp and startup_home_kd must contain 7 values");
+    }
+    if (params.force_feedback_max_torque.size() != 7 || params.force_feedback_scale < 0.0 ||
+        params.force_feedback_filter_alpha < 0.0 || params.force_feedback_filter_alpha > 1.0 ||
+        params.force_feedback_timeout_s <= 0.0) {
+      throw std::invalid_argument("invalid force feedback parameters");
     }
     for (double velocity : params.max_joint_vel) {
       if (!(velocity > 0.0)) {
@@ -231,6 +250,16 @@ public:
       left_command_topic, command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
         if (left_arm_) left_arm_->setTargetJointState(msg);
+      });
+    right_force_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+      right_force_feedback_topic, command_qos,
+      [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+        if (right_arm_) right_arm_->setForceFeedback(msg->effort);
+      });
+    left_force_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+      left_force_feedback_topic, command_qos,
+      [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+        if (left_arm_) left_arm_->setForceFeedback(msg->effort);
       });
 
     if (publish_joint_states && joint_states_rate > 0.0) {
@@ -385,6 +414,8 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_force_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_force_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   rclcpp::TimerBase::SharedPtr joint_state_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disable_service_;

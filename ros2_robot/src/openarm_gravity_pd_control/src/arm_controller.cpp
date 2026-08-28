@@ -127,6 +127,8 @@ ArmController::ArmController(const std::string & can_interface,
   target_positions_.resize(ARM_DOF, 0.0);
   interp_from_.resize(ARM_DOF, 0.0);
   interp_to_.resize(ARM_DOF, 0.0);
+  force_feedback_target_.assign(ARM_DOF, 0.0);
+  force_feedback_filtered_.assign(ARM_DOF, 0.0);
   log_interval_ms_ = static_cast<int64_t>(params_.log_interval_s * 1000.0);
   if (params_.log_interval_s <= 0.0) {
     log_interval_ms_ = 0;
@@ -255,6 +257,18 @@ void ArmController::setTargetJointState(const sensor_msgs::msg::JointState::Shar
   new_target_pending_ = new_target_pending_ || target_changed;
 }
 
+void ArmController::setForceFeedback(const std::vector<double> & torque)
+{
+  if (torque.size() < ARM_DOF) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(force_feedback_mutex_);
+  for (size_t i = 0; i < ARM_DOF; ++i) {
+    force_feedback_target_[i] = std::isfinite(torque[i]) ? torque[i] : 0.0;
+  }
+  force_feedback_time_ = std::chrono::steady_clock::now();
+}
+
 // ── Control step ──────────────────────────────────────────────────────────────
 void ArmController::controlStep()
 {
@@ -379,14 +393,48 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
     t *= params_.grav_scale;
   }
 
+  // Haptic feedback is deliberately additive to gravity compensation, not a
+  // replacement for it.  The remote gateway supplies the opposite of the
+  // follower contact torque; apply a low-pass filter, hard per-joint clamp,
+  // and stale-message decay before it can reach the leader motors.
+  std::vector<double> tau_haptic(n, 0.0);
+  {
+    std::lock_guard<std::mutex> lock(force_feedback_mutex_);
+    const bool fresh = params_.force_feedback_enabled &&
+      force_feedback_time_.time_since_epoch().count() != 0 &&
+      std::chrono::duration<double>(now - force_feedback_time_).count() <=
+        params_.force_feedback_timeout_s;
+    const double alpha = std::clamp(params_.force_feedback_filter_alpha, 0.0, 1.0);
+    for (size_t i = 0; i < n; ++i) {
+      const double raw = fresh ? params_.force_feedback_scale * force_feedback_target_[i] : 0.0;
+      const double limit = i < params_.force_feedback_max_torque.size() ?
+        std::abs(params_.force_feedback_max_torque[i]) : 0.0;
+      const double bounded = std::clamp(raw, -limit, limit);
+      force_feedback_filtered_[i] += alpha * (bounded - force_feedback_filtered_[i]);
+      tau_haptic[i] = force_feedback_filtered_[i];
+    }
+  }
+
   std::vector<openarm::damiao_motor::MITParam> arm_cmds;
   arm_cmds.reserve(n);
+  std::vector<double> interaction_effort(n, 0.0);
   for (size_t i = 0; i < n; ++i) {
     const auto & active_kp = direct_target ? params_.startup_home_kp : params_.kp;
     const auto & active_kd = direct_target ? params_.startup_home_kd : params_.kd;
     const double kp = (i < active_kp.size()) ? active_kp[i] : 10.0;
     const double kd = (i < active_kd.size()) ? active_kd[i] : 0.5;
-    arm_cmds.push_back({kp, kd, command_positions_[i], 0.0, tau_grav[i]});
+    const double commanded_torque =
+      kp * (command_positions_[i] - q_act[i]) + kd * (-dq_act[i]) + tau_grav[i] + tau_haptic[i];
+    // The motor reports its measured actuator torque.  Removing our own
+    // gravity/PD command gives the best available contact-torque estimate in
+    // this hardware configuration (no dedicated joint torque sensor).
+    interaction_effort[i] = tau_act[i] - commanded_torque;
+    arm_cmds.push_back({kp, kd, command_positions_[i], 0.0, tau_grav[i] + tau_haptic[i]});
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    latest_state_.effort = interaction_effort;
   }
 
   openarm_->get_arm().mit_control_all(arm_cmds);

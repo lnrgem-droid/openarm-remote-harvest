@@ -45,6 +45,13 @@ struct ArmControlParams {
   double grav_scale    = 0.95;   ///< Scale gravity torque; < 1 prevents upward drift
   double gripper_kp    = 16.0;
   double gripper_kd    = 0.2;
+  /// Optional haptic torque reflected from the remote follower.  It is always
+  /// bounded and decays to zero when its local message stream becomes stale.
+  bool force_feedback_enabled = false;
+  double force_feedback_scale = 0.15;
+  double force_feedback_filter_alpha = 0.10;
+  double force_feedback_timeout_s = 0.05;
+  std::vector<double> force_feedback_max_torque = {0.35, 0.35, 0.25, 0.25, 0.15, 0.15, 0.12};
   /// Physical travel of the gripper motor [rad].
   /// normalized input 1.0 maps to this angle.
   /// Set to the actual hardware limit to avoid hitting end stops.
@@ -112,6 +119,10 @@ public:
    */
   void setTargetJointState(const sensor_msgs::msg::JointState::SharedPtr msg);
 
+  /// Set follower contact-torque estimates received on the leader only.
+  /// The values must already be expressed in this controller's joint order.
+  void setForceFeedback(const std::vector<double> & torque);
+
   /**
    * Execute one gravity+PD control step.
    * Call at control_dt (default 500 Hz) from a timer or dedicated thread.
@@ -147,6 +158,10 @@ private:
   double target_gripper_ = 1.0;            ///< Desired gripper [0=closed, 1=open]; default open
   std::mutex target_mutex_;
   bool new_target_pending_ = false;
+  std::mutex force_feedback_mutex_;
+  std::vector<double> force_feedback_target_;
+  std::vector<double> force_feedback_filtered_;
+  std::chrono::steady_clock::time_point force_feedback_time_{};
   bool initialized_ = false;
 
   static constexpr size_t ARM_DOF = 7;

@@ -40,6 +40,7 @@ def test_state_round_trip():
         fault_bits=FaultBits.NETWORK_TIMEOUT | FaultBits.LOCAL_WATCHDOG,
         positions=(0.0,) * AXIS_COUNT,
         velocities=(0.1,) * AXIS_COUNT,
+        efforts=tuple(float(index) / 100.0 for index in range(AXIS_COUNT)),
     )
     assert decode_message(encode_state(source)) == source
 
