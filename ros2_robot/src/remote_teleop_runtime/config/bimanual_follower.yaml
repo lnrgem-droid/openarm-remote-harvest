@@ -1,0 +1,24 @@
+/**:
+  ros__parameters:
+    # Jetson: right follower can1, left follower can2.
+    enable_right: true
+    enable_left: true
+    right_arm_can: can1
+    left_arm_can: can2
+    control_rate: 500.0
+    grav_scale: 0.95
+    kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0]
+    kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4]
+    gripper_kp: 5.0
+    gripper_kd: 1.0
+    gripper_max_rad: -1.0472
+    # Same verified staged-test limits as the right-arm configuration.
+    max_joint_vel: [0.30, 0.30, 0.30, 0.30, 0.40, 0.40, 0.60]
+    command_interp_s: 0.02
+    publish_joint_states: true
+    joint_states_rate: 100.0
+    right_command_topic: /follower/right_arm/joint_command
+    left_command_topic: /follower/left_arm/joint_command
+    joint_states_topic: /follower/joint_states
+    disable_service: /follower/openarm_gravity_pd/disable
+    pause_service: /follower/openarm_gravity_pd/pause_command_refresh

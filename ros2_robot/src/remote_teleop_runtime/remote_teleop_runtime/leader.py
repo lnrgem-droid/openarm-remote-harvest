@@ -17,14 +17,16 @@ from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
 
 
 class LeaderGateway(Node):
-    def __init__(self, peer: str, rate: float):
+    def __init__(self, peer: str, rate: float, enable_left: bool):
         super().__init__("remote_teleop_leader")
         self.peer = peer
         self.period = 1.0 / rate
         self.session = secrets.randbits(64) or 1
         self.sequence = 0
         self.axes = [0.0] * 16
-        self.have_state = False
+        self.enable_left = enable_left
+        self.have_right = False
+        self.have_left = False
         self.lock = threading.Lock()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", STATE_PORT))
@@ -33,25 +35,30 @@ class LeaderGateway(Node):
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
         self.last_log = time.monotonic()
+        arms = "right + left" if enable_left else "right only"
         self.get_logger().info(
-            f"RIGHT ONLY leader session={self.session} -> {peer}:{ACTION_PORT} at {rate:.0f} Hz")
+            f"{arms} leader session={self.session} -> {peer}:{ACTION_PORT} at {rate:.0f} Hz")
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position))
-        names = [f"openarm_right_joint{i}" for i in range(1, 8)]
-        if not all(name in values for name in names):
-            return
-        right = [float(values[name]) for name in names]
-        finger = float(values.get("openarm_right_finger_joint1", 0.0))
-        gripper_rad = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
         with self.lock:
-            self.axes[8:15] = right
-            self.axes[15] = gripper_rad
-            self.have_state = True
+            right_names = [f"openarm_right_joint{i}" for i in range(1, 8)]
+            if all(name in values for name in right_names):
+                self.axes[8:15] = [float(values[name]) for name in right_names]
+                finger = float(values.get("openarm_right_finger_joint1", 0.0))
+                self.axes[15] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
+                self.have_right = True
+            if self.enable_left:
+                left_names = [f"openarm_left_joint{i}" for i in range(1, 8)]
+                if all(name in values for name in left_names):
+                    self.axes[0:7] = [float(values[name]) for name in left_names]
+                    finger = float(values.get("openarm_left_finger_joint1", 0.0))
+                    self.axes[7] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
+                    self.have_left = True
 
     def tick(self):
         with self.lock:
-            if not self.have_state:
+            if not self.have_right or (self.enable_left and not self.have_left):
                 return
             axes = tuple(self.axes)
         self.sequence += 1
@@ -78,9 +85,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--peer", default="192.168.50.2")
     parser.add_argument("--rate", type=float, default=100.0)
+    parser.add_argument("--enable-left", action="store_true",
+                        help="send left-arm axes as well as the default right arm")
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
-    node = LeaderGateway(args.peer, args.rate)
+    node = LeaderGateway(args.peer, args.rate, args.enable_left)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

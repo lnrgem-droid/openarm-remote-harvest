@@ -22,6 +22,7 @@ LEADER_JOINT_STATES_TOPIC = "/leader/joint_states"
 FOLLOWER_JOINT_STATES_TOPIC = "/follower/joint_states"
 LEADER_RIGHT_COMMAND_TOPIC = "/leader/right_arm/joint_command"
 FOLLOWER_RIGHT_COMMAND_TOPIC = "/follower/right_arm/joint_command"
+FOLLOWER_LEFT_COMMAND_TOPIC = "/follower/left_arm/joint_command"
 FOLLOWER_DISABLE_SERVICE = "/follower/openarm_gravity_pd/disable"
 
 
