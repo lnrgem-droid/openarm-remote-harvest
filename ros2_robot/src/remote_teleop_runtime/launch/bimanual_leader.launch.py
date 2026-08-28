@@ -33,13 +33,17 @@ def generate_launch_description():
         DeclareLaunchArgument("startup_home", default_value="true",
             description="Explicitly move both leader arms to existing encoder q=0 at startup"),
         DeclareLaunchArgument("force_feedback", default_value="false",
-            description="Enable bounded follower-contact torque reflection on the leader"),
+            description="Enable compliant bilateral contact-error feedback (no raw motor-torque reflection)"),
         Node(package="openarm_gravity_pd_control", executable="openarm_gravity_pd_node",
              parameters=[os.path.join(pd_share, "config", "control_params.yaml"),
                          os.path.join(rt_share, "config", "bimanual_leader.yaml"),
                          {"urdf_path": urdf, "joint_limits_path": limits,
                           "startup_home": startup_home,
-                          "force_feedback_enabled": force_feedback,
+                          # Raw motor-torque residuals include model/gravity error
+                          # and made J2-J7 feel artificially heavy.  Keep this
+                          # path off; force_feedback enables only the compliant
+                          # follower tracking/contact-error coupling below.
+                          "force_feedback_enabled": False,
                           "bilateral_position_feedback_enabled": force_feedback}],
              name="leader_gravity_pd", output="screen"),
         Node(package="remote_teleop_runtime", executable="remote-teleop-leader",
