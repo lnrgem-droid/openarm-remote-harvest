@@ -53,7 +53,12 @@ def _start_control_stack(context):
 
 def _launch_actions(context):
     verified = LaunchConfiguration("reaction_verified").perform(context).lower() == "true"
+    startup_home = LaunchConfiguration("startup_home").perform(context).lower() == "true"
     watchdog_args = ["--verified-reaction", "position_hold"] if verified else []
+    # Two arms initialize and home sequentially, so the normal 2 s liveness
+    # grace would fault before the controller can send its first heartbeat.
+    if startup_home:
+        watchdog_args += ["--startup-grace-s", "15"]
     return [
         Node(package="remote_teleop_follower_safety",
              executable="remote-teleop-follower-watchdog",

@@ -58,6 +58,12 @@ struct ArmControlParams {
   /// existing encoder q=0 reference; it never writes motor zero offsets.
   bool startup_home = false;
   double startup_home_duration_s = 2.0;
+  double startup_home_timeout_s = 15.0;
+  double startup_home_tolerance_rad = 0.03;
+  /// Used only during startup homing, so a gravity-compensated leader can
+  /// return to q=0 without changing its deliberately light normal feel.
+  std::vector<double> startup_home_kp = {30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0};
+  std::vector<double> startup_home_kd = {2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4};
 };
 
 struct JointStateSnapshot {
@@ -123,7 +129,7 @@ public:
 
 private:
   void applyPositionLimits(std::vector<double> & positions) const;
-  void homeToZeroInterpolated(double duration_s);
+  void homeToZeroInterpolated(double duration_s, double timeout_s, double tolerance_rad);
   /// Run one control step toward an optional direct target; nullptr uses ROS commands.
   void executeControlStep(const std::vector<double> * direct_target);
 

@@ -187,7 +187,10 @@ bool ArmController::init()
   // calibrated encoder q=0 pose, while retaining the current gripper opening.
   // It is opt-in because it causes physical motion during startup.
   if (params_.startup_home) {
-    homeToZeroInterpolated(params_.startup_home_duration_s);
+    homeToZeroInterpolated(
+      params_.startup_home_duration_s,
+      params_.startup_home_timeout_s,
+      params_.startup_home_tolerance_rad);
   }
 
   std::cout << "[ArmController][" << can_interface_ << "] Ready." << std::endl;
@@ -379,8 +382,10 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   std::vector<openarm::damiao_motor::MITParam> arm_cmds;
   arm_cmds.reserve(n);
   for (size_t i = 0; i < n; ++i) {
-    const double kp = (i < params_.kp.size()) ? params_.kp[i] : 10.0;
-    const double kd = (i < params_.kd.size()) ? params_.kd[i] : 0.5;
+    const auto & active_kp = direct_target ? params_.startup_home_kp : params_.kp;
+    const auto & active_kd = direct_target ? params_.startup_home_kd : params_.kd;
+    const double kp = (i < active_kp.size()) ? active_kp[i] : 10.0;
+    const double kd = (i < active_kd.size()) ? active_kd[i] : 0.5;
     arm_cmds.push_back({kp, kd, command_positions_[i], 0.0, tau_grav[i]});
   }
 
@@ -420,7 +425,8 @@ void ArmController::applyPositionLimits(std::vector<double> & positions) const
   }
 }
 
-void ArmController::homeToZeroInterpolated(double duration_s)
+void ArmController::homeToZeroInterpolated(
+  double duration_s, double timeout_s, double tolerance_rad)
 {
   openarm_->refresh_all();
   openarm_->recv_all();
@@ -432,8 +438,9 @@ void ArmController::homeToZeroInterpolated(double duration_s)
     start_q[i] = arm_motors[i].get_position();
   }
 
-  RCLCPP_WARN(logger_, "Startup homing to existing encoder q=0 over %.1f s; motor zero offsets are unchanged.",
-    duration_s);
+  RCLCPP_WARN(logger_,
+    "Startup homing to existing encoder q=0 over %.1f s (timeout %.1f s); motor zero offsets are unchanged.",
+    duration_s, timeout_s);
   const auto t0 = std::chrono::steady_clock::now();
   while (true) {
     const double elapsed =
@@ -445,7 +452,21 @@ void ArmController::homeToZeroInterpolated(double duration_s)
     applyPositionLimits(home_target);
     executeControlStep(&home_target);
     if (alpha >= 1.0) {
-      break;
+      const auto & current_motors = openarm_->get_arm().get_motors();
+      double max_error = 0.0;
+      for (size_t i = 0; i < std::min(current_motors.size(), ARM_DOF); ++i) {
+        max_error = std::max(max_error, std::abs(current_motors[i].get_position()));
+      }
+      if (max_error <= tolerance_rad) {
+        RCLCPP_WARN(logger_, "Startup homing reached q=0 within %.3f rad.", tolerance_rad);
+        break;
+      }
+      if (elapsed >= timeout_s) {
+        RCLCPP_ERROR(logger_,
+          "Startup homing timed out with max encoder error %.3f rad; holding q=0 target for inspection.",
+          max_error);
+        break;
+      }
     }
     const auto sleep_ms = std::max(
       1, static_cast<int>(std::lround(params_.control_dt * 1000.0)));
@@ -454,7 +475,7 @@ void ArmController::homeToZeroInterpolated(double duration_s)
   std::lock_guard<std::mutex> lock(target_mutex_);
   target_positions_ = home_target;
   new_target_pending_ = true;
-  RCLCPP_WARN(logger_, "Startup homing complete.");
+  RCLCPP_WARN(logger_, "Startup homing command complete.");
 }
 
 }  // namespace openarm_gravity_pd_control

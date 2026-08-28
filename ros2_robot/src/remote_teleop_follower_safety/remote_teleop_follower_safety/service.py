@@ -61,6 +61,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Independent Jetson follower watchdog")
     parser.add_argument("--socket", default="/tmp/openarm_follower_watchdog.sock")
     parser.add_argument("--duration", type=float, default=0.0, help="0 means run until signal")
+    parser.add_argument("--startup-grace-s", type=float, default=2.0,
+                        help="maximum controller initialization time before a liveness fault")
     parser.add_argument(
         "--verified-reaction",
         choices=("position_hold",),
@@ -73,6 +75,8 @@ def main() -> None:
     # Ignore those transport arguments rather than exiting before supervision
     # starts.
     args, _unknown_ros_args = parser.parse_known_args()
+    if not args.startup_grace_s > 0.0:
+        parser.error("--startup-grace-s must be positive")
 
     reaction = SafetyReaction.UNDECIDED
     verified = False
@@ -82,7 +86,8 @@ def main() -> None:
         verified = True
 
     machine = SafetyStateMachine(reaction, verified)
-    supervisor = WatchdogSupervisor(machine, WatchdogConfig())
+    supervisor = WatchdogSupervisor(
+        machine, WatchdogConfig(startup_grace_ns=int(args.startup_grace_s * 1_000_000_000)))
     supervisor.boot(time.monotonic_ns())
 
     socket_path = os.path.abspath(args.socket)
