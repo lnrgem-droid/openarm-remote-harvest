@@ -5,12 +5,18 @@ set -euo pipefail
 
 ROOT_DIR="${OPENARM_RGBD_ROOT:-/home/nvidia/dev/openarm-rgbd-preview}"
 PYTHON_BIN="${LEROBOT_PYTHON:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
-DATASET_ROOT="${DATASET_ROOT:-/home/nvidia/datasets/openarm_rgbd}"
+DATASET_ROOT="${DATASET_ROOT:-/home/nvidia/datasets/openarm_rgbd_$(date +%Y%m%d_%H%M%S)}"
 DATASET_ID="${DATASET_ID:-openarm/mushroom-rgbd}"
 TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
 
-mkdir -p "$DATASET_ROOT"
-available_gb=$(df -PB1G "$DATASET_ROOT" | awk 'NR==2 {gsub("G", "", $4); print $4}')
+DATASET_PARENT=$(dirname "$DATASET_ROOT")
+mkdir -p "$DATASET_PARENT"
+if [[ -e "$DATASET_ROOT" ]]; then
+  echo "Refusing recording: dataset path already exists: $DATASET_ROOT" >&2
+  echo "Choose a new DATASET_ROOT; LeRobot requires a new empty path." >&2
+  exit 1
+fi
+available_gb=$(df -PB1G "$DATASET_PARENT" | awk 'NR==2 {gsub("G", "", $4); print $4}')
 if (( available_gb < 20 )); then
   echo "Refusing recording: only ${available_gb} GB free; at least 20 GB is required." >&2
   exit 1

@@ -51,11 +51,10 @@ Jetson 终端 3 启动录制。它保留 LeRobot 的 `n/r/q` episode 操作，�
 
 ```bash
 DATASET_ID=openarm/mushroom-rgbd \
-DATASET_ROOT=/home/nvidia/datasets/openarm_rgbd \
 /home/nvidia/dev/openarm-rgbd-preview/scripts/record_jetson_rgbd_dataset.sh
 ```
 
-录制脚本会在开始前检查 20 GB 的可用空间。视频使用两 episode 后顺序编码，避免一次启动六路编码进程。
+录制脚本会自动创建带时间戳的新目录，并在开始前检查 20 GB 的可用空间。视频使用两 episode 后顺序编码，避免一次启动六路编码进程。
 
 ## 安全和资源规则
 
