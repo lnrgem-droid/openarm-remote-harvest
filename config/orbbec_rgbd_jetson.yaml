@@ -1,5 +1,5 @@
-# Confirm the two wrist roles with scripts/jetson_orbbec_identify.py before use.
+# Confirmed during commissioning on 2026-08-28.
 cameras:
-  left_wrist: {serial: ""}
-  right_wrist: {serial: ""}
+  left_wrist: {serial: "CV2L360000D9"}
+  right_wrist: {serial: "CV2L360000NR"}
   chest: {serial: "CP3294Y0001E"}
