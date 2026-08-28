@@ -42,11 +42,12 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-if ssh "$JETSON_HOST" "pgrep -af 'remote-teleop-follower-watchdog|remote-teleop-follower|follower_gravity_pd' >/dev/null"; then
+# Bracketed first characters prevent pgrep from matching its own remote command.
+if ssh "$JETSON_HOST" "pgrep -af '[r]emote-teleop-follower-watchdog|[r]emote-teleop-follower|[f]ollower_gravity_pd' >/dev/null"; then
   echo "ERROR: a Jetson follower stack is already running. Stop it cleanly before using this script." >&2
   exit 1
 fi
-if pgrep -af 'leader_gravity_pd|remote-teleop-leader' >/dev/null; then
+if pgrep -af '[l]eader_gravity_pd|[r]emote-teleop-leader' >/dev/null; then
   echo "ERROR: a host leader stack is already running. Stop it cleanly before using this script." >&2
   exit 1
 fi
