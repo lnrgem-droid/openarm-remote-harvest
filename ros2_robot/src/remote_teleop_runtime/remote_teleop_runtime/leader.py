@@ -43,7 +43,7 @@ class LeaderGateway(Node):
             JointState, LEADER_LEFT_COMMAND_TOPIC, 1) if enable_left else None)
         # Reference pair and short action history let us distinguish genuine
         # follower contact error from ordinary network transport delay.
-        self.bilateral_reference = None
+        self.haptic_reference = None
         self.action_history = {}
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
@@ -54,52 +54,44 @@ class LeaderGateway(Node):
             "bounded haptic stream available")
 
     def publish_force_feedback(self, state: FollowerState):
-        # A follower effort opposing leader motion must feel resistive at the
-        # leader, hence the negative sign.  The leader controller applies its
-        # own low-pass, clamp, scale, and 50 ms stale-data decay.
+        """Publish a passive virtual spring from follower tracking error.
+
+        The original single-computer bilateral loop exchanges fresh state at
+        500 Hz.  Across Ethernet, raw follower motor torque and delayed pose
+        both create false "gravity" resistance.  Instead we compare follower
+        actual pose with the pose commanded by the *applied* action sequence.
+        Free motion produces zero torque; contact produces a bounded opposing
+        torque on the corresponding leader joint.
+        """
         if state.control_state.name != "RUNNING" or state.fault_bits:
             efforts = [0.0] * 8
             left_efforts = [0.0] * 8
+            self.haptic_reference = None
         else:
-            efforts = [-float(value) for value in state.efforts[8:16]]
-            left_efforts = [-float(value) for value in state.efforts[0:8]]
+            applied = self.action_history.get(state.applied_action_sequence)
+            if applied is None:
+                return
+            if self.haptic_reference is None:
+                self.haptic_reference = (applied, tuple(state.positions))
+            leader_zero, follower_zero = self.haptic_reference
+            desired = [follower_ref + (leader_command - leader_ref) for
+                       follower_ref, leader_command, leader_ref in zip(
+                           follower_zero, applied, leader_zero)]
+            error = [actual - target for actual, target in zip(state.positions, desired)]
+            # Nm/rad.  These gains are intentionally much lower than the
+            # position-controller gains: this is an impedance cue, not a
+            # delayed pose-servo.  Gripper is separately capped by the leader
+            # controller to protect the printed fingers.
+            gains = [2.5, 2.5, 2.0, 2.0, 0.8, 0.8, 0.6, 0.8,
+                     2.5, 2.5, 2.0, 2.0, 0.8, 0.8, 0.6, 0.8]
+            virtual_torque = [gain * delta for gain, delta in zip(gains, error)]
+            efforts = virtual_torque[8:16]
+            left_efforts = virtual_torque[0:8]
         right = JointState(); right.effort = efforts
         self.right_force_pub.publish(right)
         if self.enable_left:
             left = JointState(); left.effort = left_efforts
             self.left_force_pub.publish(left)
-
-    def publish_position_feedback(self, state: FollowerState):
-        """Reflect only follower tracking/contact error, never transport lag."""
-        if state.control_state.name != "RUNNING" or state.fault_bits:
-            self.bilateral_reference = None
-            return
-        with self.lock:
-            leader_now = tuple(self.axes)
-        applied = self.action_history.get(state.applied_action_sequence)
-        if applied is None:
-            return
-        if self.bilateral_reference is None:
-            self.bilateral_reference = (applied, tuple(state.positions))
-        leader_zero, follower_zero = self.bilateral_reference
-        follower_desired = [follower_ref + (leader_command - leader_ref) for
-                            follower_ref, leader_command, leader_ref in zip(
-                                follower_zero, applied, leader_zero)]
-        # In free space actual≈desired and target≈leader_now, so the master
-        # remains light.  When contact prevents follower motion, the signed
-        # error shifts the master target against the operator's motion.
-        correction_scale = 0.50
-        target = [leader + correction_scale * (actual - desired) for
-                  leader, actual, desired in zip(leader_now, state.positions, follower_desired)]
-        right = JointState()
-        right.name = [f"openarm_right_joint{i}" for i in range(1, 8)] + ["openarm_right_gripper"]
-        right.position = target[8:15] + [max(0.0, min(1.0, target[15] / GRIPPER_MAX_RAD))]
-        self.right_position_feedback_pub.publish(right)
-        if self.enable_left:
-            left = JointState()
-            left.name = [f"openarm_left_joint{i}" for i in range(1, 8)] + ["openarm_left_gripper"]
-            left.position = target[0:7] + [max(0.0, min(1.0, target[7] / GRIPPER_MAX_RAD))]
-            self.left_position_feedback_pub.publish(left)
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position))
@@ -138,7 +130,6 @@ class LeaderGateway(Node):
                 if isinstance(state, FollowerState):
                     self.received += 1
                     self.publish_force_feedback(state)
-                    self.publish_position_feedback(state)
         except BlockingIOError:
             pass
         except PacketError:
