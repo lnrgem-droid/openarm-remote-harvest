@@ -12,7 +12,7 @@ TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
 # CUDA runtime. Threads stay in the healthy parent process and NVMe handles
 # the six independent image writes in parallel.
 IMAGE_WRITER_PROCESSES="${IMAGE_WRITER_PROCESSES:-0}"
-IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-8}"
+IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-1}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
 RESET_TIME_S="${RESET_TIME_S:-60}"
 NUM_EPISODES="${NUM_EPISODES:-50}"
