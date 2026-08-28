@@ -90,6 +90,10 @@ public:
     declare_parameter("command_interp_s", 0.02);
     declare_parameter("startup_home", false);
     declare_parameter("startup_home_duration_s", 2.0);
+    declare_parameter("startup_home_timeout_s", 15.0);
+    declare_parameter("startup_home_tolerance_rad", 0.03);
+    declare_parameter("startup_home_kp", std::vector<double>{30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0});
+    declare_parameter("startup_home_kd", std::vector<double>{2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4});
     declare_parameter("publish_joint_states", true);
     declare_parameter("joint_states_rate", 100.0);
     // Role-specific ROS names prevent a leader and follower on the same LAN
@@ -114,6 +118,10 @@ public:
     const bool startup_home = get_parameter("startup_home").as_bool();
     const double startup_home_duration_s =
       get_parameter("startup_home_duration_s").as_double();
+    const double startup_home_timeout_s =
+      get_parameter("startup_home_timeout_s").as_double();
+    const double startup_home_tolerance_rad =
+      get_parameter("startup_home_tolerance_rad").as_double();
     const std::string right_command_topic = get_parameter("right_command_topic").as_string();
     const std::string left_command_topic = get_parameter("left_command_topic").as_string();
     const std::string joint_states_topic = get_parameter("joint_states_topic").as_string();
@@ -138,8 +146,10 @@ public:
     if (command_interp_s < 0.0) {
       throw std::invalid_argument("command_interp_s must be >= 0");
     }
-    if (!(startup_home_duration_s > 0.0)) {
-      throw std::invalid_argument("startup_home_duration_s must be positive");
+    if (!(startup_home_duration_s > 0.0) || !(startup_home_timeout_s >= startup_home_duration_s) ||
+        !(startup_home_tolerance_rad > 0.0)) {
+      throw std::invalid_argument(
+        "startup home requires positive duration/tolerance and timeout >= duration");
     }
 
     ArmControlParams params;
@@ -155,9 +165,16 @@ public:
     params.command_interp_s = command_interp_s;
     params.startup_home = startup_home;
     params.startup_home_duration_s = startup_home_duration_s;
+    params.startup_home_timeout_s = startup_home_timeout_s;
+    params.startup_home_tolerance_rad = startup_home_tolerance_rad;
+    params.startup_home_kp = get_parameter("startup_home_kp").as_double_array();
+    params.startup_home_kd = get_parameter("startup_home_kd").as_double_array();
 
     if (params.max_joint_vel.size() != 7) {
       throw std::invalid_argument("max_joint_vel must contain 7 values");
+    }
+    if (params.startup_home_kp.size() != 7 || params.startup_home_kd.size() != 7) {
+      throw std::invalid_argument("startup_home_kp and startup_home_kd must contain 7 values");
     }
     for (double velocity : params.max_joint_vel) {
       if (!(velocity > 0.0)) {
@@ -175,8 +192,8 @@ public:
     RCLCPP_INFO(get_logger(), "Log interval   : %.1f s", params.log_interval_s);
     RCLCPP_INFO(get_logger(), "Control rate   : %.0f Hz", control_rate);
     RCLCPP_INFO(get_logger(), "Cmd interp     : %.0f ms", command_interp_s * 1000.0);
-    RCLCPP_WARN(get_logger(), "Startup home   : %s%s", startup_home ? "ENABLED (moves to encoder q=0)" : "disabled (hold measured pose)",
-      startup_home ? "" : "");
+    RCLCPP_WARN(get_logger(), "Startup home   : %s",
+      startup_home ? "ENABLED (moves to encoder q=0)" : "disabled (hold measured pose)");
     RCLCPP_INFO(get_logger(), "Joint states   : %s at %.1f Hz",
       publish_joint_states ? "enabled" : "disabled", joint_states_rate);
     RCLCPP_INFO(get_logger(), "ROS routes    : state=%s command=%s disable=%s",
