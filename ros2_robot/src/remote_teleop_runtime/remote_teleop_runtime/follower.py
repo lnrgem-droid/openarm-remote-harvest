@@ -165,6 +165,27 @@ class FollowerGateway(Node):
             left_msg.position = left_desired + [max(0.0, min(1.0, left_gripper_rad / GRIPPER_MAX_RAD))]
             self.left_publisher.publish(left_msg)
 
+    def capture_run_reference(self):
+        """Capture the relative leader/follower pose at the RUNNING boundary.
+
+        The watchdog state is refreshed asynchronously by the heartbeat.  The
+        operator's ``run`` command may therefore be acknowledged one timer
+        cycle before the gateway observes RUNNING.  Capturing here, from the
+        observed state and current action, makes the transition deterministic
+        and prevents a RUNNING-but-static follower after a fresh startup.
+        """
+        if not self.latest_action or not self.have_feedback:
+            return
+        self.run_leader_right = tuple(self.latest_action.right_arm)
+        self.run_follower_right = tuple(self.positions[8:15])
+        self.run_leader_gripper = self.latest_action.right_gripper
+        self.run_follower_gripper = self.positions[15]
+        if self.enable_left:
+            self.run_leader_left = tuple(self.latest_action.left_arm)
+            self.run_follower_left = tuple(self.positions[0:7])
+            self.run_leader_left_gripper = self.latest_action.left_gripper
+            self.run_follower_left_gripper = self.positions[7]
+
     def handle_commands(self, now_ns):
         try:
             while True:
@@ -184,15 +205,7 @@ class FollowerGateway(Node):
                     if not self.latest_action: raise RuntimeError("no leader session")
                     response = safety_command(self.watchdog, "request_run", leader_session_id=self.latest_action.session_id) or {}
                     if response.get("state") == "RUNNING":
-                        self.run_leader_right = tuple(self.latest_action.right_arm)
-                        self.run_follower_right = tuple(self.positions[8:15])
-                        self.run_leader_gripper = self.latest_action.right_gripper
-                        self.run_follower_gripper = self.positions[15]
-                        if self.enable_left:
-                            self.run_leader_left = tuple(self.latest_action.left_arm)
-                            self.run_follower_left = tuple(self.positions[0:7])
-                            self.run_leader_left_gripper = self.latest_action.left_gripper
-                            self.run_follower_left_gripper = self.positions[7]
+                        self.capture_run_reference()
                 elif cmd == "hold":
                     response = safety_command(self.watchdog, "hold") or {}
                     self.clear_run_reference()
@@ -262,7 +275,12 @@ class FollowerGateway(Node):
             if aligned and not self.align_since_ns: self.align_since_ns = now_ns
             elif not aligned: self.align_since_ns = 0
         self.heartbeat(now_ns)
-        self.handle_commands(now_ns); self.publish_target(now_ns); self.send_state(now_ns)
+        self.handle_commands(now_ns)
+        # The next watchdog heartbeat after `run` is the authoritative state
+        # transition. Capture here as a second, timing-independent safeguard.
+        if self.safety.get("state") == "RUNNING" and self.run_leader_right is None:
+            self.capture_run_reference()
+        self.publish_target(now_ns); self.send_state(now_ns)
 
     def close(self):
         self.udp.close(); self.command.close(); self.watchdog.close()
