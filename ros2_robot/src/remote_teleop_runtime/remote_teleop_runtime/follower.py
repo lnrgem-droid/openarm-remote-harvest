@@ -44,7 +44,7 @@ class FollowerGateway(Node):
         self.create_subscription(JointState, FOLLOWER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
         self.disable_client = self.create_client(Trigger, FOLLOWER_DISABLE_SERVICE)
         self.lock = threading.Lock()
-        self.positions = [0.0] * 16; self.velocities = [0.0] * 16
+        self.positions = [0.0] * 16; self.velocities = [0.0] * 16; self.efforts = [0.0] * 16
         self.have_right_feedback = False; self.have_left_feedback = not enable_left
         self.last_feedback_ns = 0
         self.latest_action = None; self.last_action_rx_ns = 0; self.peer_ip = None
@@ -71,22 +71,27 @@ class FollowerGateway(Node):
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position)); velocities = dict(zip(msg.name, msg.velocity))
+        efforts = dict(zip(msg.name, msg.effort))
         now = time.monotonic_ns()
         with self.lock:
             right_names = [f"openarm_right_joint{i}" for i in range(1, 8)]
             if all(n in values for n in right_names):
                 self.positions[8:15] = [float(values[n]) for n in right_names]
                 self.velocities[8:15] = [float(velocities.get(n, 0.0)) for n in right_names]
+                self.efforts[8:15] = [float(efforts.get(n, 0.0)) for n in right_names]
                 finger = float(values.get("openarm_right_finger_joint1", 0.0))
                 self.positions[15] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
+                self.efforts[15] = float(efforts.get("openarm_right_finger_joint1", 0.0))
                 self.have_right_feedback = True
             if self.enable_left:
                 left_names = [f"openarm_left_joint{i}" for i in range(1, 8)]
                 if all(n in values for n in left_names):
                     self.positions[0:7] = [float(values[n]) for n in left_names]
                     self.velocities[0:7] = [float(velocities.get(n, 0.0)) for n in left_names]
+                    self.efforts[0:7] = [float(efforts.get(n, 0.0)) for n in left_names]
                     finger = float(values.get("openarm_left_finger_joint1", 0.0))
                     self.positions[7] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
+                    self.efforts[7] = float(efforts.get("openarm_left_finger_joint1", 0.0))
                     self.have_left_feedback = True
             if self.have_feedback:
                 self.last_feedback_ns = now
@@ -244,7 +249,7 @@ class FollowerGateway(Node):
         state = FollowerState(self.session, self.sequence, now_ns, self.last_feedback_ns,
             self.action_timestamp_ns, self.applied_session, self.applied_sequence,
             ControlState[state_name], FaultBits(int(self.safety.get("fault_bits", 0))),
-            tuple(self.positions), tuple(self.velocities))
+            tuple(self.positions), tuple(self.velocities), tuple(self.efforts))
         self.udp.sendto(encode_state(state), (self.peer_ip, STATE_PORT))
 
     def tick(self):

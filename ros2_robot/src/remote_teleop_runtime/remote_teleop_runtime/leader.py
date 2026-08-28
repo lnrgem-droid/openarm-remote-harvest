@@ -49,11 +49,11 @@ class LeaderGateway(Node):
         # leader, hence the negative sign.  The leader controller applies its
         # own low-pass, clamp, scale, and 50 ms stale-data decay.
         if state.control_state.name != "RUNNING" or state.fault_bits:
-            efforts = [0.0] * 7
-            left_efforts = [0.0] * 7
+            efforts = [0.0] * 8
+            left_efforts = [0.0] * 8
         else:
-            efforts = [-float(value) for value in state.efforts[8:15]]
-            left_efforts = [-float(value) for value in state.efforts[0:7]]
+            efforts = [-float(value) for value in state.efforts[8:16]]
+            left_efforts = [-float(value) for value in state.efforts[0:8]]
         right = JointState(); right.effort = efforts
         self.right_force_pub.publish(right)
         if self.enable_left:
