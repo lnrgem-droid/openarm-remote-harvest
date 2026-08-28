@@ -17,7 +17,7 @@ import zlib
 
 
 MAGIC = b"OARM"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 JOINTS_PER_ARM = 7
 AXES_PER_SIDE = JOINTS_PER_ARM + 1  # seven arm joints plus one gripper joint
 AXIS_COUNT = AXES_PER_SIDE * 2
@@ -29,9 +29,9 @@ _HEADER = struct.Struct("!4sBBHQQQII")
 _ACTION = struct.Struct("!16dQ")
 # obs time, applied-action time, applied session, applied sequence, state,
 # fault bits, padding,
-# then 16 positions and 16 velocities.
+# then 16 positions, 16 velocities, and 16 follower interaction-torque estimates.
 _STATE_PREFIX = struct.Struct("!QQQQBI3x")
-_STATE_AXES = struct.Struct("!32d")
+_STATE_AXES = struct.Struct("!48d")
 
 
 class PacketError(ValueError):
@@ -140,6 +140,9 @@ class FollowerState:
     fault_bits: FaultBits
     positions: tuple[float, ...]
     velocities: tuple[float, ...]
+    # Estimated contact torque [Nm], with follower gravity and commanded PD
+    # torque removed.  Gripper values are currently zero.
+    efforts: tuple[float, ...] = (0.0,) * AXIS_COUNT
 
     def __post_init__(self) -> None:
         for field in ("session_id", "sequence", "sender_monotonic_ns", "obs_timestamp_ns"):
@@ -162,6 +165,7 @@ class FollowerState:
         object.__setattr__(self, "fault_bits", FaultBits(self.fault_bits))
         object.__setattr__(self, "positions", _axis_tuple(self.positions, "positions"))
         object.__setattr__(self, "velocities", _axis_tuple(self.velocities, "velocities"))
+        object.__setattr__(self, "efforts", _axis_tuple(self.efforts, "efforts"))
 
 
 Message = Union[ActionCommand, FollowerState]
@@ -217,7 +221,7 @@ def encode_state(state: FollowerState) -> bytes:
         int(state.control_state),
         int(state.fault_bits),
     )
-    payload = prefix + _STATE_AXES.pack(*state.positions, *state.velocities)
+    payload = prefix + _STATE_AXES.pack(*state.positions, *state.velocities, *state.efforts)
     return _encode(
         MessageType.FOLLOWER_STATE,
         state.session_id,
@@ -284,8 +288,9 @@ def decode_message(datagram: bytes) -> Message:
         applied_action_sequence=applied_seq,
         control_state=control_state,
         fault_bits=FaultBits(raw_faults),
-        positions=axes[:16],
-        velocities=axes[16:],
+        positions=axes[:AXIS_COUNT],
+        velocities=axes[AXIS_COUNT:2 * AXIS_COUNT],
+        efforts=axes[2 * AXIS_COUNT:],
     )
 
 

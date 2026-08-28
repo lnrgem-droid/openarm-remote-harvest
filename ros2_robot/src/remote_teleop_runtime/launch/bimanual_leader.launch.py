@@ -25,17 +25,21 @@ def generate_launch_description():
     rt_share = get_package_share_directory("remote_teleop_runtime")
     peer = LaunchConfiguration("peer")
     startup_home = LaunchConfiguration("startup_home")
+    force_feedback = LaunchConfiguration("force_feedback")
     return LaunchDescription([
         # UDP is the sole cross-host data transport; ROS control remains local.
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "1"),
         DeclareLaunchArgument("peer", default_value="192.168.50.2"),
         DeclareLaunchArgument("startup_home", default_value="true",
             description="Explicitly move both leader arms to existing encoder q=0 at startup"),
+        DeclareLaunchArgument("force_feedback", default_value="false",
+            description="Enable bounded follower-contact torque reflection on the leader"),
         Node(package="openarm_gravity_pd_control", executable="openarm_gravity_pd_node",
              parameters=[os.path.join(pd_share, "config", "control_params.yaml"),
                          os.path.join(rt_share, "config", "bimanual_leader.yaml"),
                          {"urdf_path": urdf, "joint_limits_path": limits,
-                          "startup_home": startup_home}],
+                          "startup_home": startup_home,
+                          "force_feedback_enabled": force_feedback}],
              name="leader_gravity_pd", output="screen"),
         Node(package="remote_teleop_runtime", executable="remote-teleop-leader",
              arguments=["--peer", peer, "--rate", "250", "--enable-left"],

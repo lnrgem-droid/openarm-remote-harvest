@@ -21,6 +21,8 @@
     joint_states_rate: 250.0
     right_command_topic: /leader/right_arm/joint_command
     left_command_topic: /leader/left_arm/joint_command
+    right_force_feedback_topic: /leader/right_arm/force_feedback
+    left_force_feedback_topic: /leader/left_arm/force_feedback
     joint_states_topic: /leader/joint_states
     disable_service: /leader/openarm_gravity_pd/disable
     pause_service: /leader/openarm_gravity_pd/pause_command_refresh

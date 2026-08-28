@@ -13,7 +13,8 @@ from sensor_msgs.msg import JointState
 
 from remote_teleop_protocol import ActionCommand, FollowerState, PacketError, decode_message, encode_action
 from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
-                     LEADER_JOINT_STATES_TOPIC, STATE_PORT)
+                     LEADER_JOINT_STATES_TOPIC, LEADER_LEFT_FORCE_FEEDBACK_TOPIC,
+                     LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, STATE_PORT)
 
 
 class LeaderGateway(Node):
@@ -32,12 +33,32 @@ class LeaderGateway(Node):
         self.sock.bind(("0.0.0.0", STATE_PORT))
         self.sock.setblocking(False)
         self.create_subscription(JointState, LEADER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
+        self.right_force_pub = self.create_publisher(JointState, LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, 1)
+        self.left_force_pub = (self.create_publisher(JointState, LEADER_LEFT_FORCE_FEEDBACK_TOPIC, 1)
+                               if enable_left else None)
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
         self.last_log = time.monotonic()
         arms = "right + left" if enable_left else "right only"
         self.get_logger().info(
-            f"{arms} leader session={self.session} -> {peer}:{ACTION_PORT} at {rate:.0f} Hz")
+            f"{arms} leader session={self.session} -> {peer}:{ACTION_PORT} at {rate:.0f} Hz; "
+            "bounded haptic stream available")
+
+    def publish_force_feedback(self, state: FollowerState):
+        # A follower effort opposing leader motion must feel resistive at the
+        # leader, hence the negative sign.  The leader controller applies its
+        # own low-pass, clamp, scale, and 50 ms stale-data decay.
+        if state.control_state.name != "RUNNING" or state.fault_bits:
+            efforts = [0.0] * 7
+            left_efforts = [0.0] * 7
+        else:
+            efforts = [-float(value) for value in state.efforts[8:15]]
+            left_efforts = [-float(value) for value in state.efforts[0:7]]
+        right = JointState(); right.effort = efforts
+        self.right_force_pub.publish(right)
+        if self.enable_left:
+            left = JointState(); left.effort = left_efforts
+            self.left_force_pub.publish(left)
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position))
@@ -69,8 +90,10 @@ class LeaderGateway(Node):
         try:
             while True:
                 data, _ = self.sock.recvfrom(2048)
-                if isinstance(decode_message(data), FollowerState):
+                state = decode_message(data)
+                if isinstance(state, FollowerState):
                     self.received += 1
+                    self.publish_force_feedback(state)
         except BlockingIOError:
             pass
         except PacketError:
