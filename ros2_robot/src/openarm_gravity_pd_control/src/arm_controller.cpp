@@ -266,6 +266,9 @@ void ArmController::setForceFeedback(const std::vector<double> & torque)
   for (size_t i = 0; i < ARM_DOF; ++i) {
     force_feedback_target_[i] = std::isfinite(torque[i]) ? torque[i] : 0.0;
   }
+  if (torque.size() > ARM_DOF) {
+    gripper_force_feedback_target_ = std::isfinite(torque[ARM_DOF]) ? torque[ARM_DOF] : 0.0;
+  }
   force_feedback_time_ = std::chrono::steady_clock::now();
 }
 
@@ -292,6 +295,7 @@ void ArmController::feedbackOnlyStep()
     snapshot.gripper_position = std::clamp(
       GRIPPER_OPEN_M * gripper[0].get_position() / params_.gripper_max_rad,
       0.0, GRIPPER_OPEN_M);
+    snapshot.gripper_effort = gripper[0].get_torque();
   }
   std::lock_guard<std::mutex> lock(state_mutex_);
   latest_state_ = std::move(snapshot);
@@ -318,12 +322,14 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   }
 
   double gripper_position = 0.0;
+  double gripper_effort = 0.0;
   const auto & gripper_motors = openarm_->get_gripper().get_motors();
   if (!gripper_motors.empty() && params_.gripper_max_rad != 0.0) {
     gripper_position = std::clamp(
       GRIPPER_OPEN_M * gripper_motors[0].get_position() / params_.gripper_max_rad,
       0.0,
       GRIPPER_OPEN_M);
+    gripper_effort = gripper_motors[0].get_torque();
   }
 
   {
@@ -332,6 +338,7 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
     latest_state_.velocity = dq_act;
     latest_state_.effort = tau_act;
     latest_state_.gripper_position = gripper_position;
+    latest_state_.gripper_effort = gripper_effort;
     latest_state_valid_ = true;
   }
 
@@ -442,8 +449,21 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   if (!openarm_->get_gripper().get_motors().empty()) {
     const double gripper_rad =
       GRIPPER_CLOSED_RAD + gripper_target * (params_.gripper_max_rad - GRIPPER_CLOSED_RAD);
+    double gripper_haptic = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(force_feedback_mutex_);
+      const bool fresh = params_.force_feedback_enabled &&
+        force_feedback_time_.time_since_epoch().count() != 0 &&
+        std::chrono::duration<double>(now - force_feedback_time_).count() <=
+          params_.force_feedback_timeout_s;
+      const double raw = fresh ? params_.force_feedback_scale * gripper_force_feedback_target_ : 0.0;
+      const double bounded = std::clamp(raw, -0.08, 0.08);
+      const double alpha = std::clamp(params_.force_feedback_filter_alpha, 0.0, 1.0);
+      gripper_force_feedback_filtered_ += alpha * (bounded - gripper_force_feedback_filtered_);
+      gripper_haptic = gripper_force_feedback_filtered_;
+    }
     openarm_->get_gripper().mit_control_all(
-      {{params_.gripper_kp, params_.gripper_kd, gripper_rad, 0.0, 0.0}});
+      {{params_.gripper_kp, params_.gripper_kd, gripper_rad, 0.0, gripper_haptic}});
   }
 
   openarm_->recv_all();

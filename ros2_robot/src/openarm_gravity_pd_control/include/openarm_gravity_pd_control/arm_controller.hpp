@@ -78,6 +78,7 @@ struct JointStateSnapshot {
   std::vector<double> velocity;
   std::vector<double> effort;
   double gripper_position = 0.0;  ///< finger joint [m], matching /joint_states convention
+  double gripper_effort = 0.0;    ///< measured gripper motor torque [Nm]
 };
 
 /**
@@ -161,6 +162,8 @@ private:
   std::mutex force_feedback_mutex_;
   std::vector<double> force_feedback_target_;
   std::vector<double> force_feedback_filtered_;
+  double gripper_force_feedback_target_ = 0.0;
+  double gripper_force_feedback_filtered_ = 0.0;
   std::chrono::steady_clock::time_point force_feedback_time_{};
   bool initialized_ = false;
 

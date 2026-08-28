@@ -381,7 +381,7 @@ private:
     msg.name.push_back(gripper_name);
     msg.position.push_back(state.gripper_position);
     msg.velocity.push_back(0.0);
-    msg.effort.push_back(0.0);
+    msg.effort.push_back(state.gripper_effort);
   }
 
   void publishJointStates()
