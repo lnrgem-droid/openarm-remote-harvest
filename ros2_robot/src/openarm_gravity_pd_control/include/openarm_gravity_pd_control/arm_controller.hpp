@@ -54,6 +54,10 @@ struct ArmControlParams {
   /// Linear blend horizon for each new joint_command [s]. 0 disables lerp.
   /// Match upstream IK period (e.g. 0.02 for 50 Hz) to remove ZOH stair-steps.
   double command_interp_s = 0.02;
+  /// Explicit opt-in startup homing.  This moves the seven arm joints to their
+  /// existing encoder q=0 reference; it never writes motor zero offsets.
+  bool startup_home = false;
+  double startup_home_duration_s = 2.0;
 };
 
 struct JointStateSnapshot {
@@ -89,7 +93,8 @@ public:
   ~ArmController();
 
   /**
-   * Initialize KDL dynamics and CAN bus motors, holding the measured pose.
+   * Initialize KDL dynamics and CAN bus motors.  It normally holds the measured
+   * pose; with startup_home enabled it travels to existing encoder q=0 first.
    * @return true on success.
    */
   bool init();
@@ -118,6 +123,7 @@ public:
 
 private:
   void applyPositionLimits(std::vector<double> & positions) const;
+  void homeToZeroInterpolated(double duration_s);
   /// Run one control step toward an optional direct target; nullptr uses ROS commands.
   void executeControlStep(const std::vector<double> * direct_target);
 

@@ -27,6 +27,7 @@ def _start_control_stack(context):
     pd_share = get_package_share_directory("openarm_gravity_pd_control")
     rt_share = get_package_share_directory("remote_teleop_runtime")
     debug_controller = LaunchConfiguration("debug_controller").perform(context).lower() == "true"
+    startup_home = LaunchConfiguration("startup_home")
     probe = UnixDatagramClient(WATCHDOG_SOCKET)
     try:
         status = safety_command(probe, "status")
@@ -42,7 +43,8 @@ def _start_control_stack(context):
         Node(package="openarm_gravity_pd_control", executable="openarm_gravity_pd_node",
              parameters=[os.path.join(pd_share, "config", "control_params.yaml"),
                          os.path.join(rt_share, "config", "bimanual_follower.yaml"),
-                         {"urdf_path": urdf, "joint_limits_path": limits}],
+                         {"urdf_path": urdf, "joint_limits_path": limits,
+                          "startup_home": startup_home}],
              name="follower_gravity_pd", prefix=controller_prefix, output="screen"),
         Node(package="remote_teleop_runtime", executable="remote-teleop-follower",
              arguments=["--enable-left"], name="follower_gateway", output="screen"),
@@ -67,5 +69,7 @@ def generate_launch_description():
             description="Set true only after the supervised command-refresh hold test passes"),
         DeclareLaunchArgument("debug_controller", default_value="false",
             description="Run the controller under gdb and print a backtrace if it exits"),
+        DeclareLaunchArgument("startup_home", default_value="false",
+            description="Explicitly move both follower arms to existing encoder q=0 at startup"),
         OpaqueFunction(function=_launch_actions),
     ])
