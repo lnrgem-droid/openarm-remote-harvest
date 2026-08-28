@@ -74,7 +74,7 @@ def generate_launch_description():
             description="Set true only after the supervised command-refresh hold test passes"),
         DeclareLaunchArgument("debug_controller", default_value="false",
             description="Run the controller under gdb and print a backtrace if it exits"),
-        DeclareLaunchArgument("startup_home", default_value="false",
+        DeclareLaunchArgument("startup_home", default_value="true",
             description="Explicitly move both follower arms to existing encoder q=0 at startup"),
         OpaqueFunction(function=_launch_actions),
     ])
