@@ -52,7 +52,11 @@ class OrbbecCamera:
         pipe = Pipeline(device); cfg = Config()
         color = pipe.get_stream_profile_list(OBSensorType.COLOR_SENSOR).get_video_stream_profile(
             self.width, self.height, OBFormat.RGB, self.fps)
-        depth = pipe.get_stream_profile_list(OBSensorType.DEPTH_SENSOR).get_default_video_stream_profile()
+        # Do not use the device's default depth profile: on Gemini 335 it can
+        # be a larger mode which forces an extra align/resize pass and starves
+        # the third camera.  The dataset contract is explicitly 640x480@30.
+        depth = pipe.get_stream_profile_list(OBSensorType.DEPTH_SENSOR).get_video_stream_profile(
+            self.width, self.height, OBFormat.Y16, self.fps)
         cfg.enable_stream(color); cfg.enable_stream(depth)
         cfg.set_frame_aggregate_output_mode(OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
         pipe.start(cfg); align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
