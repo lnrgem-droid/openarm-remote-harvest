@@ -12,6 +12,7 @@ import os
 import pty
 import select
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -49,6 +50,17 @@ class Recorder:
             with self.log_path.open("a", encoding="utf-8") as log:
                 log.write(chunk)
 
+    def _activate_depth_spool(self, dataset_path: Path) -> None:
+        """Enable depth only after LeRobot has claimed its empty root."""
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if self.process is None or self.process.poll() is not None:
+                return
+            if dataset_path.is_dir():
+                self.active_marker.write_text(str(dataset_path) + "\n", encoding="utf-8")
+                return
+            time.sleep(0.05)
+
     def start(self) -> dict:
         self._drain()
         if self.status()["running"]:
@@ -72,19 +84,11 @@ class Recorder:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("", encoding="utf-8")
         self.pty_master, self.started, self.last_log = master, time.time(), "starting"
-        # LeRobot insists that dataset.root does not exist when its process
-        # starts.  The RGB-D service uses this marker to create depth_raw/
-        # under that same root, so creating it here races LeRobot and makes it
-        # reject every recording.  Wait for LeRobot to own/create the root,
-        # then enable the independent lossless depth spool.
-        dataset_path = Path(self.dataset_root)
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline and self.process.poll() is None:
-            if dataset_path.is_dir():
-                self.active_marker.write_text(self.dataset_root + "\n", encoding="utf-8")
-                break
-            time.sleep(0.05)
-        self._drain()
+        # Do not block the UI/start request: package imports can take longer
+        # than camera setup.  The helper waits in the background and activates
+        # raw depth only once LeRobot has created the root itself.
+        threading.Thread(target=self._activate_depth_spool, args=(Path(self.dataset_root),),
+                         daemon=True, name="depth-spool-activation").start()
         return {"ok": True, **self.status()}
 
     def stop(self) -> dict:
