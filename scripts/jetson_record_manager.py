@@ -72,7 +72,7 @@ class Recorder:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("", encoding="utf-8")
         self.pty_master, self.started, self.last_log = master, time.time(), "starting"
-        self.active_marker.touch()
+        self.active_marker.write_text(self.dataset_root + "\n", encoding="utf-8")
         return {"ok": True, **self.status()}
 
     def stop(self) -> dict:

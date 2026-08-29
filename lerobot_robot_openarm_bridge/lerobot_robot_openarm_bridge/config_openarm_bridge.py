@@ -16,6 +16,7 @@ class OpenArmBridgeConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     rgbd_endpoint: str | None = None
     rgbd_roles: tuple[str, ...] = ("left_wrist", "right_wrist", "chest")
+    rgbd_include_depth: bool = True
     state_timeout_s: float = 5.0
     policy_command_rate_hz: int = 50
 

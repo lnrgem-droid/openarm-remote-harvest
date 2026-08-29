@@ -99,6 +99,60 @@ class OrbbecCamera:
         if self.thread: self.thread.join(timeout=2.0)
 
 
+class DepthSpooler:
+    """Append lossless uint16 depth frames to NVMe while recording is active.
+
+    HEVC lossless depth encoding is too CPU-heavy for three 30 Hz streams on
+    this Jetson.  Raw sequential chunks sustain NVMe throughput and retain
+    every source frame; a later offline converter can inject them into a
+    LeRobot depth-video representation without affecting teleoperation.
+    """
+    def __init__(self, roles: tuple[str, ...]):
+        self.roles = roles
+        self.root: str | None = None
+        self.data: dict[str, object] = {}
+        self.meta: dict[str, object] = {}
+        self.last_sequence = {role: -1 for role in roles}
+        self.written = {role: 0 for role in roles}
+
+    def _close(self) -> None:
+        for stream in [*self.data.values(), *self.meta.values()]:
+            stream.close()
+        self.root = None; self.data = {}; self.meta = {}
+
+    def update(self, latest: dict) -> None:
+        marker = "/tmp/openarm-rgbd-recording.active"
+        try:
+            with open(marker, encoding="utf-8") as f:
+                root = f.read().strip()
+        except FileNotFoundError:
+            if self.root is not None:
+                self._close()
+            return
+        if not root:
+            return
+        if root != self.root:
+            if self.root is not None:
+                self._close()
+            out = os.path.join(root, "depth_raw")
+            os.makedirs(out, exist_ok=True)
+            self.root = root
+            self.data = {role: open(os.path.join(out, f"{role}.u16le"), "ab", buffering=1024 * 1024) for role in self.roles}
+            self.meta = {role: open(os.path.join(out, f"{role}.jsonl"), "a", buffering=1024 * 1024) for role in self.roles}
+            self.last_sequence = {role: -1 for role in self.roles}
+            self.written = {role: 0 for role in self.roles}
+        for role, (header, _rgb, depth) in latest.items():
+            if header["frame_sequence"] == self.last_sequence[role]:
+                continue
+            offset = self.data[role].tell()
+            self.data[role].write(depth.tobytes())
+            record = dict(header)
+            record.update({"storage": "u16le", "offset_bytes": offset, "nbytes": int(depth.nbytes)})
+            self.meta[role].write(json.dumps(record) + "\n")
+            self.last_sequence[role] = header["frame_sequence"]
+            self.written[role] += 1
+
+
 def load_specs(path: str) -> list[CameraSpec]:
     with open(path, encoding="utf-8") as f: raw = yaml.safe_load(f)
     roles = raw.get("cameras", {})
@@ -124,6 +178,7 @@ def main() -> None:
     os.makedirs(args.metadata_dir, exist_ok=True)
     metadata = {camera.spec.role: open(os.path.join(args.metadata_dir, f"{camera.spec.role}.jsonl"), "a", buffering=1)
                 for camera in cameras}
+    depth_spooler = DepthSpooler(tuple(camera.spec.role for camera in cameras))
     ctx = zmq.Context(); raw = ctx.socket(zmq.PUB); raw.setsockopt(zmq.SNDHWM, 12); raw.bind(args.ipc)
     preview = ctx.socket(zmq.PUB); preview.setsockopt(zmq.SNDHWM, 1); preview.setsockopt(zmq.LINGER, 0)
     preview.bind(f"tcp://*:{args.preview_port}")
@@ -144,6 +199,7 @@ def main() -> None:
                     metadata[camera.spec.role].write(json.dumps(header) + "\n")
                     last_seq[camera.spec.role] = header["frame_sequence"]
             now = time.monotonic()
+            depth_spooler.update(latest)
             recording = os.path.exists("/tmp/openarm-rgbd-recording.active")
             effective_preview_fps = args.record_preview_fps if recording else args.preview_fps
             if now >= next_preview and len(latest) == 3:
@@ -173,12 +229,13 @@ def main() -> None:
                         "error": camera.last_error,
                     }
                     report_counts[camera.spec.role] = camera.count
-                LOG.info("capture=%s preview_fps=%.1f", status, sent / elapsed)
+                LOG.info("capture=%s preview_fps=%.1f depth_spool=%s", status, sent / elapsed, depth_spooler.written)
                 report, sent = now, 0
             time.sleep(0.001)
     except KeyboardInterrupt: pass
     finally:
         for camera in cameras: camera.stop()
+        depth_spooler._close()
         for stream in metadata.values(): stream.close()
         raw.close(0); preview.close(0); ctx.term()
 

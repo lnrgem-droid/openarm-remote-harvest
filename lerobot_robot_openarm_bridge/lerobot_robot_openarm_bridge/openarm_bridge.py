@@ -44,7 +44,8 @@ class OpenArmBridge(Robot):
         if self.rgbd:
             for role in self.config.rgbd_roles:
                 features[f"{role}_rgb"] = (480, 640, 3)
-                features[f"{role}_depth"] = (480, 640, 1)
+                if self.config.rgbd_include_depth:
+                    features[f"{role}_depth"] = (480, 640, 1)
         return features
 
     @cached_property
@@ -114,7 +115,8 @@ class OpenArmBridge(Robot):
         if self.rgbd:
             for role, frame in self.rgbd.snapshot().items():
                 observation[f"{role}_rgb"] = frame.rgb
-                observation[f"{role}_depth"] = frame.depth
+                if self.config.rgbd_include_depth:
+                    observation[f"{role}_depth"] = frame.depth
 
         now = time.monotonic()
         if now - self._last_status_log >= 2.0:

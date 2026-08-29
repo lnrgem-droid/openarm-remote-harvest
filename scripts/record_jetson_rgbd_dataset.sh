@@ -38,6 +38,7 @@ exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --robot.control_authority=external \
   --robot.ws_url=ws://127.0.0.1:9000 \
   --robot.rgbd_endpoint=ipc:///tmp/openarm_rgbd_raw.ipc \
+  --robot.rgbd_include_depth=false \
   --teleop.type=openarm_bridge_teleop \
   --teleop.ws_url=ws://127.0.0.1:9000 \
   --dataset.repo_id="$DATASET_ID" \
