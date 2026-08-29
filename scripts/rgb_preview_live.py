@@ -18,6 +18,11 @@ import zmq
 
 
 ROLES = ("left_wrist", "right_wrist", "chest")
+TITLES = {
+    "chest": "CHEST CAMERA  |  GLOBAL WORKSPACE VIEW",
+    "left_wrist": "LEFT WRIST CAMERA  |  LEFT GRIPPER VIEW",
+    "right_wrist": "RIGHT WRIST CAMERA  |  RIGHT GRIPPER VIEW",
+}
 
 
 def decode(encoded: str) -> np.ndarray:
@@ -30,9 +35,9 @@ def decode(encoded: str) -> np.ndarray:
 
 def label(image: np.ndarray, role: str, age_ms: float, sequence: int) -> np.ndarray:
     panel = image.copy()
-    text = f"{role} | LIVE | {age_ms:.0f} ms | #{sequence}"
-    cv2.rectangle(panel, (0, 0), (panel.shape[1], 34), (0, 0, 0), -1)
-    cv2.putText(panel, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+    text = f"{TITLES[role]}  |  LIVE  |  {age_ms:.0f} ms  |  #{sequence}"
+    cv2.rectangle(panel, (0, 0), (panel.shape[1], 38), (0, 0, 0), -1)
+    cv2.putText(panel, text, (10, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 0), 1, cv2.LINE_AA)
     return panel
 
 
@@ -88,9 +93,9 @@ def main() -> None:
     control.request("status")
     name = "OpenArm LIVE RGB Preview  (q/Esc: close)"
     cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(name, 1280, 780)
-    # Mouse coordinates are in the unscaled 1920x550 composed image.
-    button = {"x1": 16, "y1": 492, "x2": 330, "y2": 538}
+    cv2.resizeWindow(name, 1280, 920)
+    # Mouse coordinates are in the 1280x1160 composed canvas.
+    button = {"x1": 330, "y1": 1050, "x2": 950, "y2": 1130}
     def on_mouse(event, x, y, _flags, _param):
         if event == cv2.EVENT_LBUTTONUP and button["x1"] <= x <= button["x2"] and button["y1"] <= y <= button["y2"]:
             _, running = control.snapshot()
@@ -99,20 +104,32 @@ def main() -> None:
     while True:
         packet = json.loads(socket.recv_string())
         now = time.time()
-        panels = []
+        panels = {}
         for role in ROLES:
             image = decode(packet["images"][role])
             age_ms = (now - float(packet["timestamps"][role])) * 1000.0
-            panels.append(label(image, role, age_ms, int(packet["frame_seq"][role])))
-        frame = cv2.hconcat(panels)
-        footer = np.zeros((70, frame.shape[1], 3), dtype=np.uint8)
+            panels[role] = label(image, role, age_ms, int(packet["frame_seq"][role]))
+        # Chest view is deliberately centred on top; the two wrist views are
+        # side-by-side below, matching the operator's left/right arms.
+        canvas = np.zeros((1040, 1280, 3), dtype=np.uint8)
+        canvas[35:515, 320:960] = panels["chest"]
+        canvas[550:1030, 0:640] = panels["left_wrist"]
+        canvas[550:1030, 640:1280] = panels["right_wrist"]
+        cv2.putText(canvas, "OpenArm remote teleoperation - LIVE RGB only", (18, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (220, 220, 220), 1, cv2.LINE_AA)
+        footer = np.zeros((120, canvas.shape[1], 3), dtype=np.uint8)
         status, running = control.snapshot()
         color = (0, 0, 220) if running else (0, 150, 0)
-        cv2.rectangle(footer, (button["x1"], 12), (button["x2"], 58), color, -1)
-        action = "STOP & SAVE LOCAL RECORDING" if running else "START LOCAL RGB-D RECORDING"
-        cv2.putText(footer, action, (28, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(footer, status, (355, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
-        cv2.imshow(name, cv2.vconcat([frame, footer]))
+        # Keep one large, unambiguous control. It starts/stops only Jetson
+        # dataset recording; it never controls CAN or robot motion.
+        bx1, bx2 = button["x1"], button["x2"]
+        cv2.rectangle(footer, (bx1, 10), (bx2, 90), color, -1)
+        action = "STOP & SAVE RECORDING" if running else "START LOCAL RGB-D RECORDING"
+        cv2.putText(footer, action, (bx1 + 38, 57), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(footer, "Saves RGB-D + follower state/action on Jetson. Does NOT move the robot.",
+                    (250, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(footer, status, (20, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (180, 180, 180), 1, cv2.LINE_AA)
+        cv2.imshow(name, cv2.vconcat([canvas, footer]))
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             break
