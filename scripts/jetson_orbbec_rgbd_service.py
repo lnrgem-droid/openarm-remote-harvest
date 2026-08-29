@@ -7,7 +7,7 @@ only component allowed to open the physical Orbbec devices.
 """
 from __future__ import annotations
 
-import argparse, base64, json, logging, os, threading, time
+import argparse, base64, json, logging, os, queue, threading, time
 from dataclasses import dataclass
 
 import cv2
@@ -100,7 +100,7 @@ class OrbbecCamera:
 
 
 class DepthSpooler:
-    """Append lossless uint16 depth frames to NVMe while recording is active.
+    """Append lossless RGB-D frames to NVMe without blocking camera dispatch.
 
     HEVC lossless depth encoding is too CPU-heavy for three 30 Hz streams on
     this Jetson.  Raw sequential chunks sustain NVMe throughput and retain
@@ -111,14 +111,38 @@ class DepthSpooler:
         self.roles = roles
         self.root: str | None = None
         self.data: dict[str, object] = {}
+        self.rgb: dict[str, object] = {}
         self.meta: dict[str, object] = {}
+        self.queues: dict[str, queue.Queue] = {}
+        self.workers: dict[str, threading.Thread] = {}
         self.last_sequence = {role: -1 for role in roles}
         self.written = {role: 0 for role in roles}
+        self.dropped = {role: 0 for role in roles}
 
     def _close(self) -> None:
-        for stream in [*self.data.values(), *self.meta.values()]:
+        for item_queue in self.queues.values():
+            item_queue.put(None)
+        for worker in self.workers.values():
+            worker.join(timeout=10.0)
+        for stream in [*self.data.values(), *self.rgb.values(), *self.meta.values()]:
             stream.close()
-        self.root = None; self.data = {}; self.meta = {}
+        self.root = None; self.data = {}; self.rgb = {}; self.meta = {}; self.queues = {}; self.workers = {}
+
+    def _writer(self, role: str) -> None:
+        item_queue = self.queues[role]
+        while True:
+            item = item_queue.get()
+            if item is None:
+                return
+            header, rgb, depth = item
+            rgb_offset = self.rgb[role].tell(); depth_offset = self.data[role].tell()
+            self.rgb[role].write(rgb.tobytes()); self.data[role].write(depth.tobytes())
+            record = dict(header)
+            record.update({"rgb_storage": "rgb24", "rgb_offset_bytes": rgb_offset,
+                           "rgb_nbytes": int(rgb.nbytes), "storage": "u16le",
+                           "offset_bytes": depth_offset, "nbytes": int(depth.nbytes)})
+            self.meta[role].write(json.dumps(record) + "\n")
+            self.written[role] += 1
 
     def update(self, latest: dict) -> None:
         marker = "/tmp/openarm-rgbd-recording.active"
@@ -136,21 +160,29 @@ class DepthSpooler:
                 self._close()
             out = os.path.join(root, "depth_raw")
             os.makedirs(out, exist_ok=True)
+            rgb_out = os.path.join(root, "rgb_raw")
+            os.makedirs(rgb_out, exist_ok=True)
             self.root = root
             self.data = {role: open(os.path.join(out, f"{role}.u16le"), "ab", buffering=1024 * 1024) for role in self.roles}
+            self.rgb = {role: open(os.path.join(rgb_out, f"{role}.rgb24"), "ab", buffering=1024 * 1024) for role in self.roles}
             self.meta = {role: open(os.path.join(out, f"{role}.jsonl"), "a", buffering=1024 * 1024) for role in self.roles}
+            self.queues = {role: queue.Queue(maxsize=8) for role in self.roles}
+            self.workers = {role: threading.Thread(target=self._writer, args=(role,), daemon=True,
+                                                    name=f"rgbd-spool-{role}") for role in self.roles}
+            for worker in self.workers.values(): worker.start()
             self.last_sequence = {role: -1 for role in self.roles}
             self.written = {role: 0 for role in self.roles}
-        for role, (header, _rgb, depth) in latest.items():
+            self.dropped = {role: 0 for role in self.roles}
+        for role, (header, rgb, depth) in latest.items():
             if header["frame_sequence"] == self.last_sequence[role]:
                 continue
-            offset = self.data[role].tell()
-            self.data[role].write(depth.tobytes())
-            record = dict(header)
-            record.update({"storage": "u16le", "offset_bytes": offset, "nbytes": int(depth.nbytes)})
-            self.meta[role].write(json.dumps(record) + "\n")
-            self.last_sequence[role] = header["frame_sequence"]
-            self.written[role] += 1
+            try:
+                self.queues[role].put_nowait((header, rgb, depth))
+                self.last_sequence[role] = header["frame_sequence"]
+            except queue.Full:
+                # Never stall capture.  A queue overflow is explicit in the
+                # health log and makes the episode invalid for training.
+                self.dropped[role] += 1
 
 
 def load_specs(path: str) -> list[CameraSpec]:
@@ -233,7 +265,8 @@ def main() -> None:
                         "error": camera.last_error,
                     }
                     report_counts[camera.spec.role] = camera.count
-                LOG.info("capture=%s preview_fps=%.1f depth_spool=%s", status, sent / elapsed, depth_spooler.written)
+                LOG.info("capture=%s preview_fps=%.1f rgbd_spool=%s spool_drop=%s", status,
+                         sent / elapsed, depth_spooler.written, depth_spooler.dropped)
                 report, sent = now, 0
             time.sleep(0.001)
     except KeyboardInterrupt: pass
