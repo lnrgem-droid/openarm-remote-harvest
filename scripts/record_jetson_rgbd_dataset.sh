@@ -50,7 +50,7 @@ exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --dataset.num_image_writer_processes="$IMAGE_WRITER_PROCESSES" \
   --dataset.num_image_writer_threads_per_camera="$IMAGE_WRITER_THREADS" \
   --dataset.encoder_threads=2 \
-  --dataset.rgb_encoder.vcodec=libx264 --dataset.rgb_encoder.pix_fmt=yuv420p \
+  --dataset.rgb_encoder.vcodec=h264 --dataset.rgb_encoder.pix_fmt=yuv420p \
   --dataset.rgb_encoder.crf=25 --dataset.rgb_encoder.preset=ultrafast \
   --dataset.depth_encoder.vcodec=hevc --dataset.depth_encoder.pix_fmt=gray12le \
   --dataset.depth_encoder.crf=0 --dataset.depth_encoder.preset=ultrafast
