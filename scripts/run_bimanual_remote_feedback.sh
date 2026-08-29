@@ -42,12 +42,14 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# Bracketed first characters prevent pgrep from matching its own remote command.
-if ssh "$JETSON_HOST" "pgrep -af '[r]emote-teleop-follower-watchdog|[r]emote-teleop-follower|[f]ollower_gravity_pd' >/dev/null"; then
+# Match executable command lines, not the pgrep/ssh shell text itself. The old
+# broad patterns matched this launch script's own command line and could block
+# every clean restart with a false "stack already running" error.
+if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^/home/nvidia/.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' >/dev/null"; then
   echo "ERROR: a Jetson follower stack is already running. Stop it cleanly before using this script." >&2
   exit 1
 fi
-if pgrep -af '[l]eader_gravity_pd|[r]emote-teleop-leader' >/dev/null; then
+if pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' >/dev/null; then
   echo "ERROR: a host leader stack is already running. Stop it cleanly before using this script." >&2
   exit 1
 fi
