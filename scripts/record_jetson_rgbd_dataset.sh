@@ -32,6 +32,8 @@ if (( available_gb < 20 )); then
   exit 1
 fi
 
+# PyAV 12 cannot construct gray12le directly from uint16 NumPy; gray16le
+# retains lossless depth codes and is supported by the Jetson HEVC encoder.
 exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --robot.type=openarm_bridge \
   --robot.control_authority=external \
@@ -52,5 +54,5 @@ exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --dataset.encoder_threads=2 \
   --dataset.rgb_encoder.vcodec=h264 --dataset.rgb_encoder.pix_fmt=yuv420p \
   --dataset.rgb_encoder.crf=25 --dataset.rgb_encoder.preset=ultrafast \
-  --dataset.depth_encoder.vcodec=hevc --dataset.depth_encoder.pix_fmt=gray12le \
+  --dataset.depth_encoder.vcodec=hevc --dataset.depth_encoder.pix_fmt=gray16le \
   --dataset.depth_encoder.crf=0 --dataset.depth_encoder.preset=ultrafast
