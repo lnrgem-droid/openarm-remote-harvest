@@ -42,16 +42,21 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# Match executable command lines, not the pgrep/ssh shell text itself. The old
-# broad patterns matched this launch script's own command line and could block
-# every clean restart with a false "stack already running" error.
-if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^/home/nvidia/.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' >/dev/null"; then
-  echo "ERROR: a Jetson follower stack is already running. Stop it cleanly before using this script." >&2
-  exit 1
-fi
+# Always replace an old control stack. A gravity-PD node can remain alive after
+# its motors were disabled (the disable service says "restart required"). Merely
+# seeing that PID and issuing RUN then produces a dangerous false-positive:
+# RUNNING in software, but no gravity compensation or motor torque.
+echo '[0/4] Holding and replacing any previous teleoperation stack...'
+remote_control hold >/dev/null 2>&1 || true
+host_pids="$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' || true)"
+if [[ -n "$host_pids" ]]; then kill -INT $host_pids 2>/dev/null || true; fi
+ssh "$JETSON_HOST" "pids=\$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^/home/nvidia/.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' || true); if [[ -n \"\$pids\" ]]; then kill -INT \$pids 2>/dev/null || true; fi"
+sleep 3
 if pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' >/dev/null; then
-  echo "ERROR: a host leader stack is already running. Stop it cleanly before using this script." >&2
-  exit 1
+  echo 'ERROR: old host control stack did not stop.' >&2; exit 1
+fi
+if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^/home/nvidia/.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' >/dev/null"; then
+  echo 'ERROR: old Jetson control stack did not stop.' >&2; exit 1
 fi
 
 echo '[1/4] Starting Jetson follower stack and controlled q=0 return...'
