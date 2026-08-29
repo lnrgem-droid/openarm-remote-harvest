@@ -113,7 +113,8 @@ def main() -> None:
     p = argparse.ArgumentParser(); p.add_argument("--config", required=True)
     p.add_argument("--ipc", default="ipc:///tmp/openarm_rgbd_raw.ipc")
     p.add_argument("--preview-port", type=int, default=5556); p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--preview-fps", type=int, default=15); p.add_argument("--quality", type=int, default=75)
+    p.add_argument("--preview-fps", type=int, default=15); p.add_argument("--record-preview-fps", type=int, default=5)
+    p.add_argument("--quality", type=int, default=75)
     p.add_argument("--metadata-dir", default="/tmp/openarm-rgbd-metadata")
     args = p.parse_args(); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try: os.unlink(args.ipc.removeprefix("ipc://"))
@@ -143,6 +144,8 @@ def main() -> None:
                     metadata[camera.spec.role].write(json.dumps(header) + "\n")
                     last_seq[camera.spec.role] = header["frame_sequence"]
             now = time.monotonic()
+            recording = os.path.exists("/tmp/openarm-rgbd-recording.active")
+            effective_preview_fps = args.record_preview_fps if recording else args.preview_fps
             if now >= next_preview and len(latest) == 3:
                 message = {"schema_version": 1, "timestamps": {}, "frame_seq": {}, "images": {}}
                 for role, (header, rgb, _) in latest.items():
@@ -154,7 +157,7 @@ def main() -> None:
                 if len(message["images"]) == 3:
                     try: preview.send_string(json.dumps(message), flags=zmq.NOBLOCK); sent += 1
                     except zmq.Again: pass
-                next_preview = now + 1.0 / args.preview_fps
+                next_preview = now + 1.0 / effective_preview_fps
             if now - report >= 2:
                 elapsed = now - report
                 status = {}

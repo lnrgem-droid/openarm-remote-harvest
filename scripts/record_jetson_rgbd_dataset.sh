@@ -11,8 +11,10 @@ TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
 # Jetson's multiprocessing writer can terminate under the existing Conda/
 # CUDA runtime. Threads stay in the healthy parent process and NVMe handles
 # the six independent image writes in parallel.
+# Streaming encoding bypasses temporary PNG/TIFF images completely. Keep the
+# image writer off; each RGB-D video stream owns an encoder queue/thread.
 IMAGE_WRITER_PROCESSES="${IMAGE_WRITER_PROCESSES:-0}"
-IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-1}"
+IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-0}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
 RESET_TIME_S="${RESET_TIME_S:-60}"
 NUM_EPISODES="${NUM_EPISODES:-50}"
@@ -43,11 +45,12 @@ exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --dataset.fps=30 --dataset.episode_time_s="$EPISODE_TIME_S" \
   --dataset.reset_time_s="$RESET_TIME_S" --dataset.num_episodes="$NUM_EPISODES" \
   --dataset.video=true --dataset.push_to_hub=false \
-  --dataset.streaming_encoding=false --dataset.video_encoding_batch_size=2 \
+  --dataset.streaming_encoding=true --dataset.video_encoding_batch_size=1 \
+  --dataset.encoder_queue_maxsize=90 \
   --dataset.num_image_writer_processes="$IMAGE_WRITER_PROCESSES" \
   --dataset.num_image_writer_threads_per_camera="$IMAGE_WRITER_THREADS" \
   --dataset.encoder_threads=2 \
-  --dataset.rgb_encoder.vcodec=h264 --dataset.rgb_encoder.pix_fmt=yuv420p \
-  --dataset.rgb_encoder.crf=23 --dataset.rgb_encoder.preset=veryfast \
+  --dataset.rgb_encoder.vcodec=libx264 --dataset.rgb_encoder.pix_fmt=yuv420p \
+  --dataset.rgb_encoder.crf=25 --dataset.rgb_encoder.preset=ultrafast \
   --dataset.depth_encoder.vcodec=hevc --dataset.depth_encoder.pix_fmt=gray12le \
   --dataset.depth_encoder.crf=0 --dataset.depth_encoder.preset=ultrafast

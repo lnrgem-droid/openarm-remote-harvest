@@ -27,9 +27,12 @@ class Recorder:
         self.last_log = "idle"
         self.dataset_root: str | None = None
         self.log_path = Path("/home/nvidia/openarm-rgbd-runtime/record-last.log")
+        self.active_marker = Path("/tmp/openarm-rgbd-recording.active")
 
     def status(self) -> dict:
         running = self.process is not None and self.process.poll() is None
+        if not running:
+            self.active_marker.unlink(missing_ok=True)
         return {"running": running, "started_unix_s": self.started,
                 "dataset_root": self.dataset_root, "last_log": self.last_log[-240:]}
 
@@ -69,6 +72,7 @@ class Recorder:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("", encoding="utf-8")
         self.pty_master, self.started, self.last_log = master, time.time(), "starting"
+        self.active_marker.touch()
         return {"ok": True, **self.status()}
 
     def stop(self) -> dict:
