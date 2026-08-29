@@ -28,7 +28,8 @@ class OpenArmBridge(Robot):
         super().__init__(config)
         self.config = config
         self.cameras = make_cameras_from_configs(config.cameras)
-        self.rgbd = RGBDHub(config.rgbd_endpoint, config.rgbd_roles) if config.rgbd_endpoint else None
+        self.rgbd = (RGBDHub(config.rgbd_endpoint, config.rgbd_roles, config.rgbd_include_depth)
+                     if config.rgbd_endpoint else None)
         self.client = OpenArmBridgeClient(config.ws_url)
         self._last_status_log = 0.0
 

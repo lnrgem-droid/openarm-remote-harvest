@@ -193,7 +193,11 @@ def main() -> None:
                 header, rgb, depth = item; latest[camera.spec.role] = item
                 if header["frame_sequence"] != last_seq[camera.spec.role]:
                     try:
-                        raw.send_multipart([f"rgbd/{camera.spec.role}".encode(), json.dumps(header).encode(), rgb.tobytes(), depth.tobytes()], flags=zmq.NOBLOCK)
+                        # RGB-only subscribers are the production recording
+                        # path.  They must never pay for a second Python copy
+                        # of Depth: the camera owner spools exact uint16 data
+                        # directly to NVMe below.
+                        raw.send_multipart([f"rgb/{camera.spec.role}".encode(), json.dumps(header).encode(), rgb.tobytes()], flags=zmq.NOBLOCK)
                     except zmq.Again:
                         camera.dropped += 1
                     metadata[camera.spec.role].write(json.dumps(header) + "\n")

@@ -14,14 +14,14 @@ class RGBDFrame:
     role: str
     header: dict
     rgb: np.ndarray
-    depth: np.ndarray
+    depth: np.ndarray | None
 
 
 class RGBDHub:
     """Subscribe to atomic RGB-D pairs; never opens an Orbbec device."""
 
-    def __init__(self, endpoint: str, roles: tuple[str, ...]):
-        self.endpoint, self.roles = endpoint, roles
+    def __init__(self, endpoint: str, roles: tuple[str, ...], include_depth: bool = True):
+        self.endpoint, self.roles, self.include_depth = endpoint, roles, include_depth
         self._frames: dict[str, RGBDFrame] = {}
         self._lock = threading.Lock()
         self._running = False
@@ -31,12 +31,13 @@ class RGBDHub:
     def connect(self, startup_timeout_s: float = 3.0) -> None:
         import zmq
         self._ctx = zmq.Context(); self._socket = self._ctx.socket(zmq.SUB)
-        # Three 30 Hz cameras arrive as independent publications. Keep a
-        # short complete set, then drain to latest below; an HWM of two can
-        # systematically starve the third role under scheduler contention.
-        self._socket.setsockopt(zmq.RCVHWM, 12)
+        # This process records RGB in real time.  Depth is losslessly spooled
+        # by the camera owner directly to NVMe, so avoid copying three extra
+        # 640x480 uint16 arrays through Python when it is not requested.
+        self._socket.setsockopt(zmq.RCVHWM, 3)
         for role in self.roles:
-            self._socket.setsockopt(zmq.SUBSCRIBE, f"rgbd/{role}".encode())
+            prefix = "rgbd" if self.include_depth else "rgb"
+            self._socket.setsockopt(zmq.SUBSCRIBE, f"{prefix}/{role}".encode())
         self._socket.connect(self.endpoint); self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="openarm-rgbd-ipc")
         self._thread.start()
@@ -65,15 +66,16 @@ class RGBDHub:
         assert self._socket is not None
         while self._running:
             try:
-                topic, raw_header, raw_rgb, raw_depth = self._socket.recv_multipart(flags=zmq.NOBLOCK)
+                parts = self._socket.recv_multipart(flags=zmq.NOBLOCK)
             except zmq.Again:
                 time.sleep(0.001); continue
             try:
-                header = json.loads(raw_header)
-                role = topic.decode().split("/", 1)[1]
+                topic, raw_header, raw_rgb, *rest = parts
+                header = json.loads(raw_header); role = topic.decode().split("/", 1)[1]
                 h, w = int(header["height"]), int(header["width"])
                 rgb = np.frombuffer(raw_rgb, dtype=np.uint8).reshape(h, w, 3).copy()
-                depth = np.frombuffer(raw_depth, dtype=np.uint16).reshape(h, w, 1).copy()
+                depth = (np.frombuffer(rest[0], dtype=np.uint16).reshape(h, w, 1).copy()
+                         if self.include_depth and rest else None)
                 with self._lock:
                     self._frames[role] = RGBDFrame(role, header, rgb, depth)
             except Exception:
