@@ -81,13 +81,18 @@ class RGBDHub:
             except Exception:
                 continue
 
-    def snapshot(self, max_age_ms: int = 100) -> dict[str, RGBDFrame]:
+    def snapshot(self, max_age_ms: int = 500) -> dict[str, RGBDFrame]:
         now = time.monotonic_ns()
         with self._lock:
             result = dict(self._frames)
         missing = [role for role in self.roles if role not in result]
         if missing:
             raise TimeoutError(f"missing RGB-D frames: {missing}")
+        # Camera-service health remains a strict 100 ms check.  This consumer
+        # runs alongside three video encoders; treating a short Python/GIL
+        # scheduling pause as a camera failure needlessly aborts a healthy
+        # episode.  500 ms is only a consumer handoff ceiling, not a relaxed
+        # capture-health definition.
         stale = [role for role, frame in result.items()
                  if now - int(frame.header["host_monotonic_ns"]) > max_age_ms * 1_000_000]
         if stale:
