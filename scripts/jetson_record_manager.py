@@ -61,6 +61,12 @@ class Recorder:
                 return
             time.sleep(0.05)
 
+    def _clear_marker_when_recording_exits(self) -> None:
+        """Never leave a camera spool attached to a completed episode."""
+        if self.process is not None:
+            self.process.wait()
+        self.active_marker.unlink(missing_ok=True)
+
     def start(self) -> dict:
         self._drain()
         if self.status()["running"]:
@@ -89,6 +95,8 @@ class Recorder:
         # raw depth only once LeRobot has created the root itself.
         threading.Thread(target=self._activate_depth_spool, args=(Path(self.dataset_root),),
                          daemon=True, name="depth-spool-activation").start()
+        threading.Thread(target=self._clear_marker_when_recording_exits,
+                         daemon=True, name="depth-spool-cleanup").start()
         return {"ok": True, **self.status()}
 
     def stop(self) -> dict:

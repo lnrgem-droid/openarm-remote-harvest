@@ -11,8 +11,11 @@ TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
 # Jetson's multiprocessing writer can terminate under the existing Conda/
 # CUDA runtime. Threads stay in the healthy parent process and NVMe handles
 # the six independent image writes in parallel.
-# Streaming encoding bypasses temporary PNG/TIFF images completely. Keep the
-# image writer off; each RGB-D video stream owns an encoder queue/thread.
+# RGB-D is captured by the single camera owner and losslessly spooled to NVMe
+# with source timestamps. Do not run three CPU H.264 encoders inside the
+# real-time LeRobot loop: that cuts the control/data loop to roughly 14 Hz on
+# this Jetson. LeRobot remains the 30 Hz state/action dataset; an offline
+# converter injects the raw RGB-D streams as standard image features.
 IMAGE_WRITER_PROCESSES="${IMAGE_WRITER_PROCESSES:-0}"
 IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-0}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
@@ -37,8 +40,6 @@ exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --robot.type=openarm_bridge \
   --robot.control_authority=external \
   --robot.ws_url=ws://127.0.0.1:9000 \
-  --robot.rgbd_endpoint=ipc:///tmp/openarm_rgbd_raw.ipc \
-  --robot.rgbd_include_depth=false \
   --teleop.type=openarm_bridge_teleop \
   --teleop.ws_url=ws://127.0.0.1:9000 \
   --dataset.repo_id="$DATASET_ID" \
