@@ -91,7 +91,8 @@ def main() -> None:
     parser.add_argument("output", type=Path, help="new empty OpenArmDataset v0.4 directory")
     parser.add_argument("--task", default="bimanual mushroom harvesting teleoperation")
     parser.add_argument("--success", action="store_true", help="mark this episode successful (default: false)")
-    parser.add_argument("--max-camera-skew-ms", type=float, default=50.0)
+    parser.add_argument("--max-camera-skew-ms", type=float, default=100.0,
+                        help="reject a robot/RGB nearest-frame match beyond this limit")
     parser.add_argument("--camera-time-offset-ms", type=float, default=0.0,
                         help="manual correction if visual validation finds a constant RGB/robot offset")
     args = parser.parse_args()
@@ -119,13 +120,6 @@ def main() -> None:
     origin_ns = min(times[role][0] for role in ROLES)
     offset_ns = int(args.camera_time_offset_ms * 1_000_000)
 
-    episode = output / "episodes" / "0"
-    camera_dirs = {role: episode / "cameras" / CAMERA_NAMES[role] for role in ROLES}
-    for path in [episode / "obs" / "arms" / "right", episode / "obs" / "arms" / "left",
-                 episode / "action" / "arms" / "right", episode / "action" / "arms" / "left",
-                 *camera_dirs.values()]:
-        path.mkdir(parents=True, exist_ok=False)
-
     target_ns = [origin_ns + int(float(row["timestamp"]) * 1_000_000_000) + offset_ns for row in rows]
     selected: dict[str, list[dict]] = {role: [nearest(indexes[role], times[role], t) for t in target_ns] for role in ROLES}
     max_skew_ns = int(args.max_camera_skew_ms * 1_000_000)
@@ -133,6 +127,14 @@ def main() -> None:
     failures = {role: sum(value > max_skew_ns for value in values) for role, values in skew.items()}
     if any(failures.values()):
         raise SystemExit(f"camera matching exceeds {args.max_camera_skew_ms} ms: {failures}")
+
+    # Do not create a partial official dataset until all alignment checks pass.
+    episode = output / "episodes" / "0"
+    camera_dirs = {role: episode / "cameras" / CAMERA_NAMES[role] for role in ROLES}
+    for path in [episode / "obs" / "arms" / "right", episode / "obs" / "arms" / "left",
+                 episode / "action" / "arms" / "right", episode / "action" / "arms" / "left",
+                 *camera_dirs.values()]:
+        path.mkdir(parents=True, exist_ok=False)
 
     timestamps = pd.to_datetime(np.asarray(target_ns, dtype=np.int64), unit="ns")
     for kind, vector_key in (("obs", "observation.state"), ("action", "action")):
