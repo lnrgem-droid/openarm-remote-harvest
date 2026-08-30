@@ -32,6 +32,7 @@
 | `docs/VALIDATION_2026-08-26.md` | 本次 bundle、编译、假硬件和真机验证记录 |
 | `docs/REMOTE_TELEOP_V1.md` | 当前已冻结的双机双臂遥操版本、网络/CAN 映射、启动与安全流程 |
 | `docs/RGBD_PREVIEW_V1.md` | 本分支三路 RGB-D 录制、实时预览、数据目录与操作流程 |
+| `docs/OFFICIAL_TRAINING_DATASET.md` | OpenArm 官方训练数据格式、离线转换和 RGB/Depth 边界 |
 
 ## 当前运行基线
 

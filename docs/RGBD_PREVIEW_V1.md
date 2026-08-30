@@ -77,7 +77,9 @@ bash /home/nvidia/dev/openarm-rgbd-preview/scripts/restart_jetson_rgbd_service.s
                                       # 帧号、设备/主机时间、字节偏移与长度
 ```
 
-`data/` 与 `meta/` 是标准 LeRobot 机械臂数据。当前视觉数据采取无损原始 sidecar，以优先保证 Jetson 上的三路 `30 FPS` 采集和落盘；后续离线转换器会按 JSONL 时间/序列索引把六路视觉流注入为标准 LeRobot 图像特征。不要删除对应的 JSONL 索引。
+`data/` 与 `meta/` 是标准 LeRobot 机械臂数据。当前视觉数据采取无损原始 sidecar，以优先保证 Jetson 上的三路 `30 FPS` 采集和落盘。不要删除对应的 JSONL 索引。
+
+若按 OpenArm 官方训练流程使用数据，请运行本仓库的离线转换器生成官方 OpenArmDataset，再运行官方的 `openarm-dataset-convert --format lerobot_v3.0`。该流程、输出格式和 Depth 边界见 [官方训练数据转换](OFFICIAL_TRAINING_DATASET.md)。
 
 ## 性能与空间边界
 
