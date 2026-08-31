@@ -88,12 +88,18 @@ ensure_jetson_can
 ensure_jetson_rgbd_services
 say "3/5 启动受控双臂遥操"
 nohup bash "$TELEOP_ROOT/scripts/run_bimanual_remote_feedback.sh" >"$LOG_DIR/teleop.log" 2>&1 &
+teleop_pid=$!
 for n in $(seq 1 60); do
   status=$(ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && ros2 run remote_teleop_runtime remote-teleop-control status" 2>/dev/null || true)
   if grep -q '"state": "RUNNING"' <<<"$status"; then break; fi
+  if ! kill -0 "$teleop_pid" 2>/dev/null; then
+    echo "ERROR: 遥操启动脚本已退出，未进入 RUNNING。最后日志如下：" >&2
+    tail -n 30 "$LOG_DIR/teleop.log" >&2 || true
+    exit 2
+  fi
   sleep 1
 done
-grep -q '"state": "RUNNING"' <<<"${status:-}" || { echo "ERROR: 遥操未进入 RUNNING。查看 $LOG_DIR/teleop.log" >&2; exit 1; }
+grep -q '"state": "RUNNING"' <<<"${status:-}" || { echo "ERROR: 遥操未在 60 秒内进入 RUNNING。查看 $LOG_DIR/teleop.log" >&2; exit 1; }
 say "4/5 开始 Jetson 本地 RGB-D 采集"
 start_recording
 say "5/5 打开主机实时预览"
