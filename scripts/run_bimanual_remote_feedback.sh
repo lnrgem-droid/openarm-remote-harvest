@@ -5,8 +5,9 @@
 # Jetson: followers, can1 (right) + can2 (left)
 #
 # This script deliberately never bypasses the follower watchdog's ALIGNING gate.
-# Both stacks move only to their existing calibrated encoder q=0 reference during
-# startup; after that, ALIGN and RUN are requested only if the watchdog accepts it.
+# Both stacks first reproduce the upstream openarm_teleop INITIAL_POSITION
+# (J4=pi/5, all other arm joints=0); after that, ALIGN and RUN are requested
+# only if the watchdog accepts it.
 # ROS Humble setup scripts themselves read optional variables that may be unset.
 # Enable nounset only after sourcing them.
 set -eo pipefail
@@ -59,14 +60,14 @@ if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-wat
   echo 'ERROR: old Jetson control stack did not stop.' >&2; exit 1
 fi
 
-echo '[1/4] Starting Jetson follower stack and controlled q=0 return...'
+echo '[1/4] Starting Jetson follower stack and controlled OpenArm initial-pose return...'
 ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && exec ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true' > /tmp/openarm_bimanual_follower.log 2>&1 &"
 
-echo '[2/4] Starting host leader stack and controlled q=0 return...'
+echo '[2/4] Starting host leader stack and controlled OpenArm initial-pose return...'
 ros2 launch remote_teleop_runtime bimanual_leader.launch.py "peer:=$PEER_IP" startup_home:=true "force_feedback:=$FORCE_FEEDBACK" >"$LOG_DIR/leader.log" 2>&1 &
 LEADER_PID=$!
 
-echo '[3/4] Waiting for both gateways and q=0 return to finish...'
+echo '[3/4] Waiting for both gateways and initial-pose return to finish...'
 for attempt in $(seq 1 50); do
   STATUS="$(remote_control status 2>/dev/null || true)"
   if grep -q '"leader_session_id": [1-9]' <<<"$STATUS" && grep -q '"state": "ALIGNING"' <<<"$STATUS"; then

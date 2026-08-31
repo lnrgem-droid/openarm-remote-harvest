@@ -512,8 +512,9 @@ void ArmController::homeToZeroInterpolated(
     start_q[i] = arm_motors[i].get_position();
   }
 
+  const auto & configured_home = params_.startup_home_target;
   RCLCPP_WARN(logger_,
-    "Startup homing to existing encoder q=0 over %.1f s (timeout %.1f s); motor zero offsets are unchanged.",
+    "Startup homing to upstream OpenArm INITIAL_POSITION over %.1f s (timeout %.1f s); motor zero offsets are unchanged.",
     duration_s, timeout_s);
   const auto t0 = std::chrono::steady_clock::now();
   while (true) {
@@ -521,7 +522,7 @@ void ArmController::homeToZeroInterpolated(
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const double alpha = std::min(elapsed / duration_s, 1.0);
     for (size_t i = 0; i < ARM_DOF; ++i) {
-      home_target[i] = start_q[i] * (1.0 - alpha);
+      home_target[i] = start_q[i] * (1.0 - alpha) + configured_home[i] * alpha;
     }
     applyPositionLimits(home_target);
     executeControlStep(&home_target);
@@ -529,15 +530,16 @@ void ArmController::homeToZeroInterpolated(
       const auto & current_motors = openarm_->get_arm().get_motors();
       double max_error = 0.0;
       for (size_t i = 0; i < std::min(current_motors.size(), ARM_DOF); ++i) {
-        max_error = std::max(max_error, std::abs(current_motors[i].get_position()));
+        max_error = std::max(
+          max_error, std::abs(current_motors[i].get_position() - configured_home[i]));
       }
       if (max_error <= tolerance_rad) {
-        RCLCPP_WARN(logger_, "Startup homing reached q=0 within %.3f rad.", tolerance_rad);
+        RCLCPP_WARN(logger_, "Startup homing reached upstream initial pose within %.3f rad.", tolerance_rad);
         break;
       }
       if (elapsed >= timeout_s) {
         RCLCPP_ERROR(logger_,
-          "Startup homing timed out with max encoder error %.3f rad; holding q=0 target for inspection.",
+          "Startup homing timed out with max pose error %.3f rad; holding initial target for inspection.",
           max_error);
         break;
       }

@@ -68,12 +68,15 @@ struct ArmControlParams {
   /// Linear blend horizon for each new joint_command [s]. 0 disables lerp.
   /// Match upstream IK period (e.g. 0.02 for 50 Hz) to remove ZOH stair-steps.
   double command_interp_s = 0.02;
-  /// Explicit opt-in startup homing.  This moves the seven arm joints to their
-  /// existing encoder q=0 reference; it never writes motor zero offsets.
+  /// Explicit opt-in startup homing. This reproduces OpenArm's upstream
+  /// AdjustPosition pose; it never writes motor zero offsets.
   bool startup_home = false;
   double startup_home_duration_s = 2.0;
   double startup_home_timeout_s = 15.0;
   double startup_home_tolerance_rad = 0.03;
+  /// Upstream openarm_teleop INITIAL_POSITION: J4 is pi/5, all others zero.
+  std::vector<double> startup_home_target = {0.0, 0.0, 0.0, 0.6283185307179586,
+                                              0.0, 0.0, 0.0};
   /// Used only during startup homing, so a gravity-compensated leader can
   /// return to q=0 without changing its deliberately light normal feel.
   std::vector<double> startup_home_kp = {30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0};

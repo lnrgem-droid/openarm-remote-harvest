@@ -102,6 +102,8 @@ public:
     declare_parameter("startup_home_duration_s", 2.0);
     declare_parameter("startup_home_timeout_s", 15.0);
     declare_parameter("startup_home_tolerance_rad", 0.03);
+    declare_parameter("startup_home_target", std::vector<double>{
+      0.0, 0.0, 0.0, 0.6283185307179586, 0.0, 0.0, 0.0});
     declare_parameter("startup_home_kp", std::vector<double>{30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0});
     declare_parameter("startup_home_kd", std::vector<double>{2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4});
     declare_parameter("publish_joint_states", true);
@@ -191,14 +193,16 @@ public:
     params.startup_home_duration_s = startup_home_duration_s;
     params.startup_home_timeout_s = startup_home_timeout_s;
     params.startup_home_tolerance_rad = startup_home_tolerance_rad;
+    params.startup_home_target = get_parameter("startup_home_target").as_double_array();
     params.startup_home_kp = get_parameter("startup_home_kp").as_double_array();
     params.startup_home_kd = get_parameter("startup_home_kd").as_double_array();
 
     if (params.max_joint_vel.size() != 7) {
       throw std::invalid_argument("max_joint_vel must contain 7 values");
     }
-    if (params.startup_home_kp.size() != 7 || params.startup_home_kd.size() != 7) {
-      throw std::invalid_argument("startup_home_kp and startup_home_kd must contain 7 values");
+    if (params.startup_home_kp.size() != 7 || params.startup_home_kd.size() != 7 ||
+        params.startup_home_target.size() != 7) {
+      throw std::invalid_argument("startup home target, kp and kd must contain 7 values");
     }
     if (params.force_feedback_max_torque.size() != 7 || params.force_feedback_scale < 0.0 ||
         params.force_feedback_filter_alpha < 0.0 || params.force_feedback_filter_alpha > 1.0 ||
