@@ -76,7 +76,7 @@ c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 2000); s.connec
 s.send_json({"command":"status"}); status=s.recv_json()
 if status.get("running"):
     s.close(0); c.term(); c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557"); s.send_json({"command":"stop"}); print(s.recv_json())
-PY
+PY'
 }
 
 say "1/5 检查主机 CAN 与网络"
