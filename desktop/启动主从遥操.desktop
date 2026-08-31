@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=启动主从遥操（不采集）
+Comment=检查网络和 CAN，受控归零、对齐后启动双臂遥操
+Exec=/home/openarm/dev/openarm-remote-harvest/scripts/daily_start_teleop_only.sh
+Terminal=true
+Categories=Utility;
