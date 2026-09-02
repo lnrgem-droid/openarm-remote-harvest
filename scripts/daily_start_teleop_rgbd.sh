@@ -63,6 +63,19 @@ if ! alive "$runtime/record-manager.pid"; then
   echo "启动 Jetson 录制管理服务…"
   nohup bash "$root/scripts/start_jetson_record_manager.sh" >"$runtime/record-manager.log" 2>&1 & echo $! >"$runtime/record-manager.pid"
 fi
+# Enforce the data-plane CPU partition even when services were started by an
+# older launcher or a manual command. Camera/recording work must never run on
+# CPUs 0-2 reserved for follower safety and CAN control.
+for pid_file in "$runtime/camera-service.pid" "$runtime/record-manager.pid"; do
+  if alive "$pid_file"; then
+    taskset --all-tasks --pid --cpu-list 3-7 "$(cat "$pid_file")" >/dev/null
+  fi
+done
+bridge_pids=$(pgrep -f "^/usr/bin/python3 /opt/ros/humble/bin/ros2 launch robot_bridge|^/usr/bin/python3 /home/nvidia/dev/openarm-rgbd-preview/ros2_robot/install/robot_bridge/.*/bridge_node" || true)
+for bridge_pid in $bridge_pids; do
+  taskset --all-tasks --pid --cpu-list 3-7 "$bridge_pid" >/dev/null 2>&1 || true
+  renice -n 2 -p "$bridge_pid" >/dev/null 2>&1 || true
+done
 for n in $(seq 1 20); do
   test -S /tmp/openarm_rgbd_raw.ipc && break
   sleep 1

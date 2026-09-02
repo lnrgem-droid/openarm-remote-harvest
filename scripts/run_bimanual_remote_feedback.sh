@@ -19,10 +19,15 @@ JETSON_ROOT="${JETSON_ROOT:-/home/nvidia/dev/openarm-remote-harvest}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
 FORCE_FEEDBACK="${FORCE_FEEDBACK:-true}"
 LOG_DIR="${LOG_DIR:-/tmp/openarm-remote-teleop}"
+JETSON_CONTROL_CPUSET="${JETSON_CONTROL_CPUSET:-0-2}"
 HOST_CONTROL_NODE="$ROS_DIR/install_bimanual/openarm_gravity_pd_control/lib/openarm_gravity_pd_control/openarm_gravity_pd_node"
 JETSON_CONTROL_NODE="$JETSON_ROOT/ros2_robot/install_bimanual/openarm_gravity_pd_control/lib/openarm_gravity_pd_control/openarm_gravity_pd_node"
 HOME_MARKER="Startup homing to upstream OpenArm INITIAL_POSITION"
 mkdir -p "$LOG_DIR"
+if [[ ! "$JETSON_CONTROL_CPUSET" =~ ^[0-9,-]+$ ]]; then
+  echo "ERROR: invalid JETSON_CONTROL_CPUSET: $JETSON_CONTROL_CPUSET" >&2
+  exit 64
+fi
 
 source /opt/ros/humble/setup.bash
 source "$ROS_DIR/install/setup.bash"
@@ -68,6 +73,10 @@ verify_runtime_builds() {
   fi
   if ! ssh "$JETSON_HOST" "test -x '$JETSON_CONTROL_NODE' && strings '$JETSON_CONTROL_NODE' | grep -F '$HOME_MARKER' >/dev/null"; then
     echo "ERROR: Jetson install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先同步并编译。" >&2
+    return 1
+  fi
+  if ! ssh "$JETSON_HOST" "taskset --cpu-list '$JETSON_CONTROL_CPUSET' true"; then
+    echo "ERROR: Jetson cannot reserve control CPUs $JETSON_CONTROL_CPUSET." >&2
     return 1
   fi
   if ! check_jetson_python_runtime; then
@@ -128,7 +137,7 @@ if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-wat
 fi
 
 echo '[2/6] Starting Jetson follower stack and controlled OpenArm initial-pose return...'
-ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && exec ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true' > /tmp/openarm_bimanual_follower.log 2>&1 &"
+ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && exec taskset --cpu-list $JETSON_CONTROL_CPUSET ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true' > /tmp/openarm_bimanual_follower.log 2>&1 &"
 
 echo '[3/6] Waiting for both follower arms to finish initial-pose return...'
 FOLLOWER_READY=false

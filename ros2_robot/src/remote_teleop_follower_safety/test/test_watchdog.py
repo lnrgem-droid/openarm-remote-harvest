@@ -11,6 +11,14 @@ import pytest
 BASE = 10_000_000_000
 
 
+def test_production_defaults_keep_network_timeout_stricter_than_local_jitter_budget():
+    config = WatchdogConfig()
+    assert config.network_action_timeout_ns == 150_000_000
+    assert config.control_cycle_timeout_ns == 250_000_000
+    assert config.control_heartbeat_timeout_ns == 300_000_000
+    assert config.network_action_timeout_ns < config.control_cycle_timeout_ns
+
+
 def make_supervisor(running=False):
     machine = SafetyStateMachine(SafetyReaction.POSITION_HOLD, True)
     config = WatchdogConfig(
