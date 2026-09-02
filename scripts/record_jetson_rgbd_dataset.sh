@@ -21,6 +21,15 @@ IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-0}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
 RESET_TIME_S="${RESET_TIME_S:-60}"
 NUM_EPISODES="${NUM_EPISODES:-50}"
+# Keep all LeRobot writers/encoders off the CPUs reserved for the follower
+# watchdog, UDP gateway, and 500 Hz CAN controller. Child encoder processes
+# inherit both this affinity and the lower scheduling priority.
+RGBD_RECORD_CPUSET="${RGBD_RECORD_CPUSET:-3-7}"
+RGBD_RECORD_NICE="${RGBD_RECORD_NICE:-10}"
+if [[ ! "$RGBD_RECORD_CPUSET" =~ ^[0-9,-]+$ ]] || [[ ! "$RGBD_RECORD_NICE" =~ ^[0-9]+$ ]]; then
+  echo "Invalid RGB-D CPU/priority configuration." >&2
+  exit 64
+fi
 
 DATASET_PARENT=$(dirname "$DATASET_ROOT")
 mkdir -p "$DATASET_PARENT"
@@ -36,7 +45,8 @@ if (( available_gb < 20 )); then
 fi
 
 # PyAV 12 gray12le compatibility is handled in our local depth encoder patch.
-exec "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
+exec taskset --cpu-list "$RGBD_RECORD_CPUSET" nice -n "$RGBD_RECORD_NICE" \
+  "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --robot.type=openarm_bridge \
   --robot.control_authority=external \
   --robot.ws_url=ws://127.0.0.1:9000 \

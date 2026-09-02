@@ -104,6 +104,11 @@ class Recorder:
         if not self.status()["running"]:
             return {"ok": False, "error": "recording is not running", **self.status()}
         assert self.pty_master is not None
+        # Stop the lossless RGB-D spool immediately at the operator's stop
+        # boundary. Keeping six raw streams open while LeRobot finalizes its
+        # metadata adds avoidable NVMe and CPU pressure precisely when the
+        # control process needs to remain responsive.
+        self.active_marker.unlink(missing_ok=True)
         os.write(self.pty_master, b"q")
         return {"ok": True, "message": "stop requested; saving episode", **self.status()}
 
