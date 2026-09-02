@@ -7,16 +7,22 @@ RGBD_ROOT="/home/openarm/dev/openarm-rgbd-preview"
 JETSON_HOST="${JETSON_HOST:-openarm-jetson}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
 LOG_DIR="/tmp/openarm-daily-start"
+HOST_CAN_SETUP="$TELEOP_ROOT/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
+JETSON_CAN_SETUP="/home/nvidia/openarm_robot/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
 mkdir -p "$LOG_DIR"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 
 ensure_host_can() {
   local iface
+  if [[ ! -x "$HOST_CAN_SETUP" ]]; then
+    echo "ERROR: 主机 CAN 配置程序不存在：$HOST_CAN_SETUP" >&2
+    exit 1
+  fi
   for iface in can0 can1; do
     if ! ip link show "$iface" 2>/dev/null | grep -q 'state UP'; then
       echo "主机 $iface 未启用，正在配置 CAN FD（可能要求输入 sudo 密码）…"
-      openarm-can-configure-socketcan "$iface" -fd -b 1000000 -d 5000000
+      "$HOST_CAN_SETUP" "$iface" -fd -b 1000000 -d 5000000
     fi
     ip -brief link show "$iface"
   done
@@ -28,7 +34,7 @@ ensure_jetson_can() {
     return
   fi
   echo "Jetson can1/can2 未启用，正在配置 CAN FD（可能要求输入 Jetson sudo 密码）…"
-  ssh -tt "$JETSON_HOST" 'openarm-can-configure-socketcan can1 -fd -b 1000000 -d 5000000 && openarm-can-configure-socketcan can2 -fd -b 1000000 -d 5000000'
+  ssh -tt "$JETSON_HOST" "$JETSON_CAN_SETUP can1 -fd -b 1000000 -d 5000000 && $JETSON_CAN_SETUP can2 -fd -b 1000000 -d 5000000"
 }
 
 ensure_jetson_rgbd_services() {

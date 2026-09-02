@@ -2,6 +2,7 @@
 # Desktop launcher wrapper. Keep a visible terminal on both success and error.
 set -euo pipefail
 LOG_FILE=/tmp/openarm-daily-teleop-rgbd.log
+printf '%s desktop launcher invoked\n' "$(date --iso-8601=seconds)" >> "$LOG_FILE"
 exec gnome-terminal --title="OpenArm｜主从遥操与 RGB-D 采集" -- bash -lc '
 set -o pipefail
 bash /home/openarm/dev/openarm-remote-harvest/scripts/daily_start_teleop_rgbd.sh 2>&1 | tee /tmp/openarm-daily-teleop-rgbd.log
