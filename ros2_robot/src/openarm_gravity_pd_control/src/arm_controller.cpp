@@ -193,6 +193,11 @@ bool ArmController::init()
       params_.startup_home_duration_s,
       params_.startup_home_timeout_s,
       params_.startup_home_tolerance_rad);
+    // Homing finishes before the remote watchdog can acknowledge ALIGN/RUN.
+    // Keep the exact home target under the same startup gains across that
+    // distributed handshake; the launcher explicitly releases this hold only
+    // after RUNNING is confirmed.
+    startup_hold_active_.store(true);
   }
 
   std::cout << "[ArmController][" << can_interface_ << "] Ready." << std::endl;
@@ -275,7 +280,11 @@ void ArmController::setForceFeedback(const std::vector<double> & torque)
 // ── Control step ──────────────────────────────────────────────────────────────
 void ArmController::controlStep()
 {
-  executeControlStep(nullptr);
+  if (startup_hold_active_.load()) {
+    executeControlStep(&params_.startup_home_target);
+  } else {
+    executeControlStep(nullptr);
+  }
 }
 
 void ArmController::feedbackOnlyStep()

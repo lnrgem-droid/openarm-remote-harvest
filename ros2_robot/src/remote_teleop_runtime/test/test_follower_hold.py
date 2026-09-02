@@ -1,0 +1,44 @@
+from remote_teleop_runtime.follower import FollowerGateway
+
+
+def _gateway_with_feedback():
+    gateway = object.__new__(FollowerGateway)
+    gateway.enable_left = True
+    gateway.have_right_feedback = True
+    gateway.have_left_feedback = True
+    gateway.positions = [float(index) for index in range(16)]
+    gateway.hold_right = gateway.hold_left = None
+    gateway.hold_right_gripper = gateway.hold_left_gripper = None
+    return gateway
+
+
+def test_hold_reference_is_a_snapshot_not_a_live_pose_alias():
+    gateway = _gateway_with_feedback()
+
+    gateway.capture_hold_reference()
+    original_right = gateway.hold_right
+    original_left = gateway.hold_left
+    gateway.positions = [value + 1.0 for value in gateway.positions]
+
+    assert gateway.hold_right == original_right
+    assert gateway.hold_left == original_left
+    assert gateway.hold_right == tuple(float(index) for index in range(8, 15))
+    assert gateway.hold_left == tuple(float(index) for index in range(0, 7))
+
+
+def test_clearing_run_reference_latches_the_current_safe_hold_pose():
+    gateway = _gateway_with_feedback()
+    gateway.run_leader_right = gateway.run_follower_right = (1.0,) * 7
+    gateway.run_leader_left = gateway.run_follower_left = (1.0,) * 7
+    gateway.run_leader_gripper = gateway.run_follower_gripper = 1.0
+    gateway.run_leader_left_gripper = gateway.run_follower_left_gripper = 1.0
+    gateway.last_target_right = gateway.last_target_left = (1.0,) * 7
+
+    gateway.clear_run_reference()
+
+    assert gateway.run_leader_right is None
+    assert gateway.run_leader_left is None
+    assert gateway.last_target_right is None
+    assert gateway.last_target_left is None
+    assert gateway.hold_right == tuple(float(index) for index in range(8, 15))
+    assert gateway.hold_left == tuple(float(index) for index in range(0, 7))

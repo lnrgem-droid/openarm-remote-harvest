@@ -15,6 +15,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -141,6 +142,13 @@ public:
    */
   void controlStep();
 
+  /**
+   * Keep using the startup pose and startup gains until the distributed
+   * leader/follower safety state has reached RUNNING.  This closes the gap
+   * between local homing completion and remote ALIGN/RUN acknowledgement.
+   */
+  void setStartupHold(bool enabled) { startup_hold_active_.store(enabled); }
+
   /** Refresh feedback without sending MIT commands (supervised safety test only). */
   void feedbackOnlyStep();
 
@@ -177,6 +185,7 @@ private:
   double gripper_force_feedback_filtered_ = 0.0;
   std::chrono::steady_clock::time_point force_feedback_time_{};
   bool initialized_ = false;
+  std::atomic<bool> startup_hold_active_{false};
 
   static constexpr size_t ARM_DOF = 7;
   static constexpr double GRIPPER_OPEN_M = 0.044;

@@ -27,3 +27,4 @@
     joint_states_topic: /leader/joint_states
     disable_service: /leader/openarm_gravity_pd/disable
     pause_service: /leader/openarm_gravity_pd/pause_command_refresh
+    startup_hold_service: /leader/openarm_gravity_pd/startup_hold

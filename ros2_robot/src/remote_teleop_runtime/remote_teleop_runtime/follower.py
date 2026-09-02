@@ -56,6 +56,13 @@ class FollowerGateway(Node):
         self.run_leader_left = self.run_follower_left = None
         self.run_leader_gripper = self.run_follower_gripper = None
         self.run_leader_left_gripper = self.run_follower_left_gripper = None
+        # A non-RUNNING state is a position hold, not a continuously moving
+        # snapshot of the measured pose.  Latch once and keep publishing it so
+        # gravity or a light disturbance cannot walk a wrist away from the
+        # startup alignment pose while the network handshake is in progress.
+        self.hold_right = self.hold_left = None
+        self.hold_right_gripper = self.hold_left_gripper = None
+        self.command_was_running = False
         self.last_target_right = self.last_target_left = None
         self.safety = {"state": "ALIGNING", "fault_bits": 0, "reason": "waiting for watchdog"}
         self.safety_rx_ns = 0; self.align_since_ns = 0
@@ -125,14 +132,33 @@ class FollowerGateway(Node):
             self.have_feedback and feedback_fresh, False, 0)
         reply = self.watchdog.exchange(encode_heartbeat(hb), 0.004)
         if reply is not None:
+            previous_state = self.safety.get("state")
             self.safety = reply; self.safety_rx_ns = now_ns
+            if previous_state == "RUNNING" and self.safety.get("state") != "RUNNING":
+                self.capture_hold_reference()
+
+    def capture_hold_reference(self):
+        """Latch the measured follower pose used by READY/HOLD/FAULT states."""
+        if not self.have_feedback:
+            return
+        self.hold_right = tuple(self.positions[8:15])
+        self.hold_right_gripper = self.positions[15]
+        if self.enable_left:
+            self.hold_left = tuple(self.positions[0:7])
+            self.hold_left_gripper = self.positions[7]
 
     def publish_target(self, now_ns):
         if not self.have_feedback: return
+        if self.hold_right is None or (self.enable_left and self.hold_left is None):
+            self.capture_hold_reference()
         running = self.safety.get("state") == "RUNNING" and now_ns - self.safety_rx_ns < 100_000_000
         fresh = self.latest_action is not None and now_ns - self.last_action_rx_ns <= 100_000_000
-        right_desired = list(self.positions[8:15]); right_gripper_rad = self.positions[15]
-        left_desired = list(self.positions[0:7]); left_gripper_rad = self.positions[7]
+        if self.command_was_running and (not running or not fresh):
+            self.capture_hold_reference()
+        self.command_was_running = running and fresh
+        right_desired = list(self.hold_right); right_gripper_rad = self.hold_right_gripper
+        left_desired = (list(self.hold_left) if self.enable_left else list(self.positions[0:7]))
+        left_gripper_rad = self.hold_left_gripper if self.enable_left else self.positions[7]
         if running and fresh and self.run_leader_right is not None:
             remote = self.latest_action
             requested = [follower_zero + (leader_now - leader_zero)
@@ -239,6 +265,7 @@ class FollowerGateway(Node):
         self.run_leader_left = self.run_follower_left = None
         self.run_leader_gripper = self.run_follower_gripper = None
         self.run_leader_left_gripper = self.run_follower_left_gripper = None
+        self.capture_hold_reference()
         self.last_target_right = self.last_target_left = None
 
     def runtime_status(self):

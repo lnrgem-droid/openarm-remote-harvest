@@ -35,6 +35,13 @@ remote_control() {
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control $command"
 }
 
+release_startup_holds() {
+  echo 'Releasing startup-pose holds after RUNNING acknowledgement...'
+  ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /leader/openarm_gravity_pd/startup_hold \
+    std_srvs/srv/SetBool '{data: false}' >/dev/null
+  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /follower/openarm_gravity_pd/startup_hold std_srvs/srv/SetBool '{data: false}' >/dev/null"
+}
+
 check_jetson_python_runtime() {
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && /usr/bin/python3 -c 'from remote_teleop_runtime.common import FOLLOWER_LEFT_COMMAND_TOPIC; from remote_teleop_runtime.follower import FollowerGateway'"
 }
@@ -159,12 +166,31 @@ fi
 echo '[6/6] Requesting safe ALIGN, then RUN...'
 ALIGN_OK=false
 for attempt in $(seq 1 12); do
-  ALIGN_STATUS="$(remote_control align 2>&1 || true)"
-  if grep -q '"state": "READY"' <<<"$ALIGN_STATUS"; then
+  ALIGN_REPLY="$(remote_control align 2>&1 || true)"
+  if grep -q '"state": "READY"' <<<"$ALIGN_REPLY"; then
     ALIGN_OK=true
     break
   fi
-  if ! grep -q 'alignment must remain' <<<"$ALIGN_STATUS"; then
+  if grep -q 'alignment must remain' <<<"$ALIGN_REPLY"; then
+    sleep 0.25
+    continue
+  fi
+  if grep -q '"error"' <<<"$ALIGN_REPLY"; then
+    echo "$ALIGN_REPLY" >&2
+    break
+  fi
+  # The command endpoint returns its current snapshot before the watchdog loop
+  # consumes the request.  Poll the authoritative status briefly instead of
+  # treating that expected stale ALIGNING reply as a failed alignment.
+  for settle_attempt in $(seq 1 20); do
+    sleep 0.10
+    ALIGN_STATUS="$(remote_control status 2>&1 || true)"
+    if grep -q '"state": "READY"' <<<"$ALIGN_STATUS"; then
+      ALIGN_OK=true
+      break 2
+    fi
+  done
+  if ! grep -q '"state": "ALIGNING"' <<<"$ALIGN_STATUS"; then
     echo "$ALIGN_STATUS" >&2
     break
   fi
@@ -174,9 +200,23 @@ if [[ "$ALIGN_OK" != true ]]; then
   echo 'ALIGN was rejected. The follower remains in HOLD; inspect the joint mismatch above.' >&2
   exit 2
 fi
-sleep 1
-remote_control run
-sleep 1
-remote_control status
+RUN_REPLY="$(remote_control run 2>&1 || true)"
+RUN_OK=false
+for attempt in $(seq 1 30); do
+  RUN_STATUS="$(remote_control status 2>&1 || true)"
+  if grep -q '"state": "RUNNING"' <<<"$RUN_STATUS"; then
+    RUN_OK=true
+    break
+  fi
+  sleep 0.10
+done
+if [[ "$RUN_OK" != true ]]; then
+  echo "$RUN_REPLY" >&2
+  echo "$RUN_STATUS" >&2
+  echo 'RUN was not acknowledged; both arms remain in startup-pose hold.' >&2
+  exit 3
+fi
+release_startup_holds
+echo "$RUN_STATUS"
 echo 'Bimanual remote teleoperation is RUNNING. Press Ctrl+C for HOLD (then support arms before disable).'
 wait "$LEADER_PID"

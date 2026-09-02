@@ -30,3 +30,4 @@
     joint_states_topic: /follower/joint_states
     disable_service: /follower/openarm_gravity_pd/disable
     pause_service: /follower/openarm_gravity_pd/pause_command_refresh
+    startup_hold_service: /follower/openarm_gravity_pd/startup_hold
