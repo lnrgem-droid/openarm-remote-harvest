@@ -83,7 +83,14 @@ verify_runtime_builds() {
 cleanup() {
   # A normal interrupt must request the tested hold behavior.  Do not disable
   # motors automatically: the operator must support the arms before disable.
-  remote_control hold >/dev/null 2>&1 || true
+  # The watchdog intentionally rejects HOLD after it has already latched FAULT.
+  # Do not turn a normal transport-timeout fault into an additional invalid-
+  # command fault while cleaning up a terminated launcher.
+  local final_status
+  final_status="$(remote_control status 2>/dev/null || true)"
+  if grep -Eq '"state": "(ALIGNING|READY|RUNNING)"' <<<"$final_status"; then
+    remote_control hold >/dev/null 2>&1 || true
+  fi
   if [[ -n "${LEADER_PID:-}" ]] && kill -0 "$LEADER_PID" 2>/dev/null; then
     kill -INT "$LEADER_PID" 2>/dev/null || true
     for _ in $(seq 1 30); do
