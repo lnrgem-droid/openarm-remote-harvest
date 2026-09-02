@@ -35,6 +35,25 @@ remote_control() {
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control $command"
 }
 
+check_jetson_python_runtime() {
+  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && /usr/bin/python3 -c 'from remote_teleop_runtime.common import FOLLOWER_LEFT_COMMAND_TOPIC; from remote_teleop_runtime.follower import FollowerGateway'"
+}
+
+repair_jetson_python_runtime() {
+  local package_source="$ROS_DIR/src/remote_teleop_runtime/remote_teleop_runtime/"
+  local config_source="$ROS_DIR/src/remote_teleop_runtime/config"
+  local installed_package="$JETSON_ROOT/ros2_robot/install/remote_teleop_runtime/lib/python3.10/site-packages/remote_teleop_runtime/"
+  local installed_config="$JETSON_ROOT/ros2_robot/install/remote_teleop_runtime/share/remote_teleop_runtime/config/"
+  local bimanual_config="$JETSON_ROOT/ros2_robot/install_bimanual/remote_teleop_runtime/share/remote_teleop_runtime/config/"
+
+  echo 'Jetson Python runtime is inconsistent; synchronizing the complete runtime package...'
+  rsync -a --include='*.py' --exclude='*' "$package_source" "$JETSON_HOST:$installed_package"
+  rsync -a "$config_source/bimanual_leader.yaml" "$config_source/bimanual_follower.yaml" \
+    "$JETSON_HOST:$installed_config"
+  rsync -a "$config_source/bimanual_leader.yaml" "$config_source/bimanual_follower.yaml" \
+    "$JETSON_HOST:$bimanual_config"
+}
+
 verify_runtime_builds() {
   if [[ ! -x "$HOST_CONTROL_NODE" ]] || ! strings "$HOST_CONTROL_NODE" | grep -F "$HOME_MARKER" >/dev/null; then
     echo "ERROR: 主机 install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先重新编译。" >&2
@@ -43,6 +62,14 @@ verify_runtime_builds() {
   if ! ssh "$JETSON_HOST" "test -x '$JETSON_CONTROL_NODE' && strings '$JETSON_CONTROL_NODE' | grep -F '$HOME_MARKER' >/dev/null"; then
     echo "ERROR: Jetson install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先同步并编译。" >&2
     return 1
+  fi
+  if ! check_jetson_python_runtime; then
+    repair_jetson_python_runtime
+    if ! check_jetson_python_runtime; then
+      echo "ERROR: Jetson remote_teleop_runtime 自动修复后仍无法导入。" >&2
+      return 1
+    fi
+    echo 'Jetson Python runtime repair: OK'
   fi
 }
 
@@ -92,6 +119,11 @@ ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source 
 echo '[3/6] Waiting for both follower arms to finish initial-pose return...'
 FOLLOWER_READY=false
 for attempt in $(seq 1 45); do
+  if ssh "$JETSON_HOST" "grep -q 'process has died' /tmp/openarm_bimanual_follower.log 2>/dev/null"; then
+    echo 'ERROR: Jetson follower stack exited during startup:' >&2
+    ssh "$JETSON_HOST" "tail -40 /tmp/openarm_bimanual_follower.log" >&2 || true
+    exit 1
+  fi
   STATUS="$(remote_control status 2>/dev/null || true)"
   if grep -q '"right_actual_rad"' <<<"$STATUS" &&
      grep -q '"left_actual_rad"' <<<"$STATUS" &&
