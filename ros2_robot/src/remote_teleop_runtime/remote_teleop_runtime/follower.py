@@ -56,10 +56,10 @@ class FollowerGateway(Node):
         self.have_right_feedback = False; self.have_left_feedback = not enable_left
         self.last_feedback_ns = 0
         self.latest_action = None; self.last_action_rx_ns = 0; self.peer_ip = None
-        # RUN uses a captured leader/follower pair as its reference. This avoids
-        # an alignment tolerance becoming a sudden absolute-position correction
-        # when remote control is enabled: follower_target = follower_zero +
-        # (leader_now - leader_zero).
+        # Capture both sides at the RUN boundary for diagnostics and a
+        # deterministic transition. During RUNNING the follower uses the
+        # leader's absolute joint positions, matching the original single-host
+        # OpenArm bilateral AdminThread behavior.
         self.run_leader_right = self.run_follower_right = None
         self.run_leader_left = self.run_follower_left = None
         self.run_leader_gripper = self.run_follower_gripper = None
@@ -169,9 +169,7 @@ class FollowerGateway(Node):
         left_gripper_rad = self.hold_left_gripper if self.enable_left else self.positions[7]
         if running and fresh and self.run_leader_right is not None:
             remote = self.latest_action
-            requested = [follower_zero + (leader_now - leader_zero)
-                         for follower_zero, leader_now, leader_zero in zip(
-                             self.run_follower_right, remote.right_arm, self.run_leader_right)]
+            requested = list(remote.right_arm)
             # Bound the target around the *current measured follower pose*.
             # Bounding around the latched startup hold pose would incorrectly
             # restrict the arm to a permanent +/-0.20 rad travel window.
@@ -181,9 +179,7 @@ class FollowerGateway(Node):
             # closes the follower even if their initial finger openings differ.
             right_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.right_gripper))
             if self.enable_left and self.run_leader_left is not None:
-                requested = [follower_zero + (leader_now - leader_zero)
-                             for follower_zero, leader_now, leader_zero in zip(
-                                 self.run_follower_left, remote.left_arm, self.run_leader_left)]
+                requested = list(remote.left_arm)
                 left_desired = bounded_tracking_target(self.positions[0:7], requested)
                 left_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.left_gripper))
             self.applied_session = remote.session_id; self.applied_sequence = remote.sequence

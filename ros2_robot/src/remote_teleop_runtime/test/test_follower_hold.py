@@ -50,3 +50,10 @@ def test_tracking_limit_is_relative_to_current_pose_not_startup_pose():
     assert bounded_tracking_target([0.60], [1.00]) == [0.80]
     assert bounded_tracking_target([0.79], [1.00]) == [0.99]
     assert bounded_tracking_target([0.99], [1.00]) == [1.00]
+
+
+def test_tracking_target_preserves_absolute_one_to_one_joint_values():
+    actual = [0.50, -0.40, 0.25]
+    leader = [0.55, -0.45, 0.20]
+
+    assert bounded_tracking_target(actual, leader) == leader
