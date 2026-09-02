@@ -10,6 +10,7 @@ LOG_DIR="/tmp/openarm-daily-start"
 HOST_CAN_SETUP="$TELEOP_ROOT/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
 JETSON_CAN_SETUP="/home/nvidia/openarm_robot/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
 START_LOCK="/tmp/openarm-daily-teleop.lock"
+TELEOP_CORE="$TELEOP_ROOT/scripts/run_bimanual_remote_feedback.sh"
 mkdir -p "$LOG_DIR"
 
 exec 9>"$START_LOCK"
@@ -19,6 +20,10 @@ if ! flock -n 9; then
 fi
 
 say() { printf '\n=== %s ===\n' "$*"; }
+
+teleop_status() {
+  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && ros2 run remote_teleop_runtime remote-teleop-control status" 2>/dev/null || true
+}
 
 ensure_host_can() {
   local iface
@@ -100,10 +105,14 @@ say "2/5 检查 Jetson 从臂 CAN 与 RGB-D 服务"
 ensure_jetson_can
 ensure_jetson_rgbd_services
 say "3/5 启动受控双臂遥操"
-nohup bash "$TELEOP_ROOT/scripts/run_bimanual_remote_feedback.sh" >"$LOG_DIR/teleop.log" 2>&1 &
+[[ -f "$TELEOP_CORE" ]] || { echo "ERROR: 遥操核心脚本不存在：$TELEOP_CORE" >&2; exit 1; }
+echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_CORE"
+# The detached teleop process must not inherit descriptor 9. Otherwise it keeps
+# the daily-start lock forever after this UI/recording wrapper exits.
+nohup bash "$TELEOP_CORE" >"$LOG_DIR/teleop.log" 2>&1 9>&- &
 teleop_pid=$!
 for n in $(seq 1 60); do
-  status=$(ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && ros2 run remote_teleop_runtime remote-teleop-control status" 2>/dev/null || true)
+  status=$(teleop_status)
   if grep -q '"state": "RUNNING"' <<<"$status"; then break; fi
   if ! kill -0 "$teleop_pid" 2>/dev/null; then
     echo "ERROR: 遥操启动脚本已退出，未进入 RUNNING。最后日志如下：" >&2
@@ -113,9 +122,43 @@ for n in $(seq 1 60); do
   sleep 1
 done
 grep -q '"state": "RUNNING"' <<<"${status:-}" || { echo "ERROR: 遥操未在 60 秒内进入 RUNNING。查看 $LOG_DIR/teleop.log" >&2; exit 1; }
+echo "遥操已进入 RUNNING，左右臂开始一一对应跟随。"
 say "4/5 开始 Jetson 本地 RGB-D 采集"
+trap stop_recording_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 start_recording
 say "5/5 打开主机实时预览"
 echo "采集已开始。点击窗口红色“停止并保存”结束；关闭窗口也会请求停止本次录制。"
-trap stop_recording_on_exit EXIT INT TERM
-/home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" --jetson "$PEER_IP" --port 5556
+/home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" --jetson "$PEER_IP" --port 5556 &
+preview_pid=$!
+
+# Keep camera/recording failures independent from robot control, but never keep
+# recording a demonstration after the teleop process or RUNNING state is lost.
+teleop_unhealthy_count=0
+while kill -0 "$preview_pid" 2>/dev/null; do
+  sleep 2
+  if ! kill -0 "$teleop_pid" 2>/dev/null; then
+    echo "ERROR: 遥操进程已退出；正在停止并保存本次录制。" >&2
+    kill "$preview_pid" 2>/dev/null || true
+    wait "$preview_pid" 2>/dev/null || true
+    exit 2
+  fi
+  status=$(teleop_status)
+  if grep -q '"state": "RUNNING"' <<<"$status"; then
+    teleop_unhealthy_count=0
+  else
+    teleop_unhealthy_count=$((teleop_unhealthy_count + 1))
+  fi
+  if (( teleop_unhealthy_count >= 2 )); then
+    echo "ERROR: 遥操已连续失去 RUNNING 状态；正在停止并保存本次录制。" >&2
+    printf '%s\n' "$status" >&2
+    kill "$preview_pid" 2>/dev/null || true
+    wait "$preview_pid" 2>/dev/null || true
+    exit 3
+  fi
+done
+
+preview_rc=0
+wait "$preview_pid" || preview_rc=$?
+exit "$preview_rc"
