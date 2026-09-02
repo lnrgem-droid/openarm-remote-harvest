@@ -203,7 +203,9 @@ def main() -> None:
     p = argparse.ArgumentParser(); p.add_argument("--config", required=True)
     p.add_argument("--ipc", default="ipc:///tmp/openarm_rgbd_raw.ipc")
     p.add_argument("--preview-port", type=int, default=5556); p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--preview-fps", type=int, default=15); p.add_argument("--record-preview-fps", type=int, default=5)
+    # Preview is deliberately best-effort.  Ten FPS remains responsive for
+    # teleoperation while leaving the 30 FPS RGB-D recording path priority.
+    p.add_argument("--preview-fps", type=int, default=15); p.add_argument("--record-preview-fps", type=int, default=10)
     p.add_argument("--quality", type=int, default=75)
     p.add_argument("--metadata-dir", default="/tmp/openarm-rgbd-metadata")
     args = p.parse_args(); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
