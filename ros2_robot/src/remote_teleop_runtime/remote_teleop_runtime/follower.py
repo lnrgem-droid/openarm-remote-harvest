@@ -25,6 +25,12 @@ from .common import (ACTION_PORT, FOLLOWER_DISABLE_SERVICE, FOLLOWER_JOINT_STATE
                      safety_command)
 
 MAX_TRACKING_ERROR_RAD = 0.20
+# A short ROS callback delay is not proof that the physical CAN bus failed.
+# Pause new tracking targets promptly when feedback is stale, but only report a
+# CAN fault after a sustained loss. This avoids latching FAULT during the
+# transient CPU/I/O spike at the start of six-stream RGB-D recording.
+FEEDBACK_CONTROL_TIMEOUT_NS = 150_000_000
+FEEDBACK_CAN_FAULT_TIMEOUT_NS = 1_000_000_000
 
 
 def bounded_tracking_target(actual, requested):
@@ -131,9 +137,10 @@ class FollowerGateway(Node):
         # `last_control_cycle_ns` describes this gateway's 100 Hz safety cycle,
         # not the asynchronous 100 Hz ROS feedback callback.  Using the latter
         # made ordinary DDS scheduling jitter look like a stalled controller.
-        # Feedback freshness is instead checked explicitly as CAN health with a
-        # 250 ms bound, still well below the time needed to use stale data.
-        feedback_fresh = now_ns - self.last_feedback_ns < 250_000_000
+        # Feedback freshness for issuing new targets is checked separately in
+        # publish_target(). A sustained one-second loss is treated as a CAN
+        # failure; shorter scheduling gaps keep the existing motor target.
+        feedback_fresh = now_ns - self.last_feedback_ns < FEEDBACK_CAN_FAULT_TIMEOUT_NS
         hb = ControllerHeartbeat(self.session, self.hb_sequence, now_ns,
             now_ns, self.last_action_rx_ns,
             self.latest_action.session_id if self.latest_action else 0,
@@ -159,7 +166,12 @@ class FollowerGateway(Node):
         if not self.have_feedback: return
         if self.hold_right is None or (self.enable_left and self.hold_left is None):
             self.capture_hold_reference()
-        running = self.safety.get("state") == "RUNNING" and now_ns - self.safety_rx_ns < 100_000_000
+        feedback_fresh = now_ns - self.last_feedback_ns < FEEDBACK_CONTROL_TIMEOUT_NS
+        running = (
+            self.safety.get("state") == "RUNNING"
+            and now_ns - self.safety_rx_ns < 100_000_000
+            and feedback_fresh
+        )
         fresh = self.latest_action is not None and now_ns - self.last_action_rx_ns <= 100_000_000
         if self.command_was_running and (not running or not fresh):
             self.capture_hold_reference()
@@ -287,6 +299,11 @@ class FollowerGateway(Node):
             if self.enable_left:
                 response["leader_left_rad"] = list(self.latest_action.left_arm)
             response["action_age_ms"] = (time.monotonic_ns() - self.last_action_rx_ns) / 1_000_000
+        if self.have_feedback:
+            feedback_age_ns = time.monotonic_ns() - self.last_feedback_ns
+            response["feedback_age_ms"] = feedback_age_ns / 1_000_000
+            response["feedback_fresh_for_control"] = (
+                feedback_age_ns < FEEDBACK_CONTROL_TIMEOUT_NS)
         if self.last_target_left is not None:
             errors = [target - actual for target, actual in zip(
                 self.last_target_left, self.positions[0:7])]

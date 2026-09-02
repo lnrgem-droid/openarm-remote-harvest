@@ -1,4 +1,9 @@
-from remote_teleop_runtime.follower import FollowerGateway, bounded_tracking_target
+from remote_teleop_runtime.follower import (
+    FEEDBACK_CAN_FAULT_TIMEOUT_NS,
+    FEEDBACK_CONTROL_TIMEOUT_NS,
+    FollowerGateway,
+    bounded_tracking_target,
+)
 
 
 def _gateway_with_feedback():
@@ -57,3 +62,9 @@ def test_tracking_target_preserves_absolute_one_to_one_joint_values():
     leader = [0.55, -0.45, 0.20]
 
     assert bounded_tracking_target(actual, leader) == leader
+
+
+def test_feedback_control_pause_precedes_latched_can_fault():
+    assert FEEDBACK_CONTROL_TIMEOUT_NS == 150_000_000
+    assert FEEDBACK_CAN_FAULT_TIMEOUT_NS == 1_000_000_000
+    assert FEEDBACK_CONTROL_TIMEOUT_NS < FEEDBACK_CAN_FAULT_TIMEOUT_NS

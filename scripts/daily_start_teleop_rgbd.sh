@@ -130,35 +130,7 @@ trap 'exit 143' TERM
 start_recording
 say "5/5 打开主机实时预览"
 echo "采集已开始。点击窗口红色“停止并保存”结束；关闭窗口也会请求停止本次录制。"
-/home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" --jetson "$PEER_IP" --port 5556 &
-preview_pid=$!
-
-# Keep camera/recording failures independent from robot control, but never keep
-# recording a demonstration after the teleop process or RUNNING state is lost.
-teleop_unhealthy_count=0
-while kill -0 "$preview_pid" 2>/dev/null; do
-  sleep 2
-  if ! kill -0 "$teleop_pid" 2>/dev/null; then
-    echo "ERROR: 遥操进程已退出；正在停止并保存本次录制。" >&2
-    kill "$preview_pid" 2>/dev/null || true
-    wait "$preview_pid" 2>/dev/null || true
-    exit 2
-  fi
-  status=$(teleop_status)
-  if grep -q '"state": "RUNNING"' <<<"$status"; then
-    teleop_unhealthy_count=0
-  else
-    teleop_unhealthy_count=$((teleop_unhealthy_count + 1))
-  fi
-  if (( teleop_unhealthy_count >= 2 )); then
-    echo "ERROR: 遥操已连续失去 RUNNING 状态；正在停止并保存本次录制。" >&2
-    printf '%s\n' "$status" >&2
-    kill "$preview_pid" 2>/dev/null || true
-    wait "$preview_pid" 2>/dev/null || true
-    exit 3
-  fi
-done
-
-preview_rc=0
-wait "$preview_pid" || preview_rc=$?
-exit "$preview_rc"
+echo "相机预览和本地录制独立运行；遥操故障不会再关闭采图窗口。"
+QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu \
+  /home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" \
+    --jetson "$PEER_IP" --port 5556
