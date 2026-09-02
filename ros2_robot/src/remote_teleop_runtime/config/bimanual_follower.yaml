@@ -6,7 +6,8 @@
     right_arm_can: can1
     left_arm_can: can2
     control_rate: 500.0
-    # Startup home is invoked only by the explicit launch argument.  A 0.06 rad
+    # Startup home is invoked only by the explicit launch argument. It uses the
+    # upstream INITIAL_POSITION (J4=pi/5), not an all-zero pose. A 0.06 rad
     # completion tolerance matches measured gravity-compensated settling error.
     startup_home_tolerance_rad: 0.06
     startup_home_timeout_s: 15.0

@@ -118,7 +118,8 @@ public:
 
   /**
    * Initialize KDL dynamics and CAN bus motors.  It normally holds the measured
-   * pose; with startup_home enabled it travels to existing encoder q=0 first.
+   * pose; with startup_home enabled it travels to the configured upstream
+   * INITIAL_POSITION first.
    * @return true on success.
    */
   bool init();

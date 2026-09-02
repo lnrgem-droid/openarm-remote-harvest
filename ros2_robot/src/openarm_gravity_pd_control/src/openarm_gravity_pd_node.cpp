@@ -230,7 +230,7 @@ public:
     RCLCPP_INFO(get_logger(), "Control rate   : %.0f Hz", control_rate);
     RCLCPP_INFO(get_logger(), "Cmd interp     : %.0f ms", command_interp_s * 1000.0);
     RCLCPP_WARN(get_logger(), "Startup home   : %s",
-      startup_home ? "ENABLED (moves to encoder q=0)" : "disabled (hold measured pose)");
+      startup_home ? "ENABLED (moves to upstream INITIAL_POSITION)" : "disabled (hold measured pose)");
     RCLCPP_INFO(get_logger(), "Joint states   : %s at %.1f Hz",
       publish_joint_states ? "enabled" : "disabled", joint_states_rate);
     RCLCPP_INFO(get_logger(), "ROS routes    : state=%s command=%s disable=%s",
