@@ -29,7 +29,6 @@
 | `docs/RESTORE_AND_TELEOP.md` | 从全新克隆恢复、编译并启动双臂主从遥操作 |
 | `docs/VALIDATION_2026-08-26.md` | 本次 bundle、编译、假硬件和真机验证记录 |
 | `docs/REMOTE_TELEOP_V1.md` | 当前已冻结的双机双臂遥操版本、网络/CAN 映射、启动与安全流程 |
-| `docs/技术改进历程_双机遥操与RGBD.md` | 从原始单机程序到双机遥操、三路 RGB-D 录制和主机预览的技术路径、踩坑与后续边界 |
 
 ## 当前运行基线
 
