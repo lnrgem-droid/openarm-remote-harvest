@@ -1,4 +1,4 @@
-from remote_teleop_runtime.follower import FollowerGateway
+from remote_teleop_runtime.follower import FollowerGateway, bounded_tracking_target
 
 
 def _gateway_with_feedback():
@@ -42,3 +42,11 @@ def test_clearing_run_reference_latches_the_current_safe_hold_pose():
     assert gateway.last_target_left is None
     assert gateway.hold_right == tuple(float(index) for index in range(8, 15))
     assert gateway.hold_left == tuple(float(index) for index in range(0, 7))
+
+
+def test_tracking_limit_is_relative_to_current_pose_not_startup_pose():
+    # A joint can travel well beyond 0.20 rad in total. Only its instantaneous
+    # command error is bounded, matching the pre-startup-hold behavior.
+    assert bounded_tracking_target([0.60], [1.00]) == [0.80]
+    assert bounded_tracking_target([0.79], [1.00]) == [0.99]
+    assert bounded_tracking_target([0.99], [1.00]) == [1.00]

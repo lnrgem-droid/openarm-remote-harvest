@@ -24,6 +24,14 @@ from .common import (ACTION_PORT, FOLLOWER_DISABLE_SERVICE, FOLLOWER_JOINT_STATE
                      RUNTIME_SOCKET, STATE_PORT, UnixDatagramClient, WATCHDOG_SOCKET,
                      safety_command)
 
+MAX_TRACKING_ERROR_RAD = 0.20
+
+
+def bounded_tracking_target(actual, requested):
+    """Limit instantaneous following error without limiting total joint travel."""
+    return [max(q - MAX_TRACKING_ERROR_RAD, min(q + MAX_TRACKING_ERROR_RAD, target))
+            for q, target in zip(actual, requested)]
+
 
 class FollowerGateway(Node):
     def __init__(self, enable_left: bool, rate: float):
@@ -164,8 +172,10 @@ class FollowerGateway(Node):
             requested = [follower_zero + (leader_now - leader_zero)
                          for follower_zero, leader_now, leader_zero in zip(
                              self.run_follower_right, remote.right_arm, self.run_leader_right)]
-            right_desired = [max(q - 0.20, min(q + 0.20, target))
-                             for q, target in zip(right_desired, requested)]
+            # Bound the target around the *current measured follower pose*.
+            # Bounding around the latched startup hold pose would incorrectly
+            # restrict the arm to a permanent +/-0.20 rad travel window.
+            right_desired = bounded_tracking_target(self.positions[8:15], requested)
             # A gripper command is an opening fraction, not a shared arm pose.
             # Use the leader's absolute opening so a closed leader always
             # closes the follower even if their initial finger openings differ.
@@ -174,8 +184,7 @@ class FollowerGateway(Node):
                 requested = [follower_zero + (leader_now - leader_zero)
                              for follower_zero, leader_now, leader_zero in zip(
                                  self.run_follower_left, remote.left_arm, self.run_leader_left)]
-                left_desired = [max(q - 0.20, min(q + 0.20, target))
-                                for q, target in zip(left_desired, requested)]
+                left_desired = bounded_tracking_target(self.positions[0:7], requested)
                 left_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.left_gripper))
             self.applied_session = remote.session_id; self.applied_sequence = remote.sequence
             self.action_timestamp_ns = now_ns
