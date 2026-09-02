@@ -7,6 +7,13 @@ JETSON_HOST="${JETSON_HOST:-openarm-jetson}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
 HOST_CAN_SETUP="$ROOT_DIR/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
 JETSON_CAN_SETUP="/home/nvidia/openarm_robot/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
+START_LOCK="/tmp/openarm-daily-teleop.lock"
+
+exec 9>"$START_LOCK"
+if ! flock -n 9; then
+  echo "ERROR: 已有一个 OpenArm 启动或遥操流程正在运行，请勿重复点击。" >&2
+  exit 4
+fi
 
 say() { printf '\n=== %s ===\n' "$*"; }
 
