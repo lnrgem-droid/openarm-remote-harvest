@@ -194,11 +194,22 @@ class FollowerGateway(Node):
                 if cmd == "status": pass
                 elif cmd == "align":
                     if not self.latest_action or not self.have_feedback: raise RuntimeError("missing action or feedback")
-                    errors = [abs(a-b) for a,b in zip(self.latest_action.right_arm, self.positions[8:15])]
+                    differences = [
+                        (f"right J{index}", float(leader), float(follower))
+                        for index, (leader, follower) in enumerate(
+                            zip(self.latest_action.right_arm, self.positions[8:15]), start=1)]
                     if self.enable_left:
-                        errors.extend(abs(a-b) for a,b in zip(self.latest_action.left_arm, self.positions[0:7]))
-                    error = max(errors)
-                    if error > 0.15: raise RuntimeError(f"alignment error {error:.3f} rad > 0.15")
+                        differences.extend(
+                            (f"left J{index}", float(leader), float(follower))
+                            for index, (leader, follower) in enumerate(
+                                zip(self.latest_action.left_arm, self.positions[0:7]), start=1))
+                    joint, leader_value, follower_value = max(
+                        differences, key=lambda item: abs(item[1] - item[2]))
+                    error = abs(leader_value - follower_value)
+                    if error > 0.15:
+                        raise RuntimeError(
+                            f"alignment error {joint}: {error:.3f} rad > 0.15 "
+                            f"(leader={leader_value:.3f}, follower={follower_value:.3f})")
                     if now_ns - self.align_since_ns < 1_000_000_000: raise RuntimeError("alignment must remain <=0.15 rad for 1 second")
                     response = safety_command(self.watchdog, "alignment_complete", leader_session_id=self.latest_action.session_id) or {}
                 elif cmd == "run":

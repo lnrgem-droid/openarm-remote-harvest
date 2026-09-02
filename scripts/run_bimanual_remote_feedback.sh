@@ -52,6 +52,15 @@ cleanup() {
   remote_control hold >/dev/null 2>&1 || true
   if [[ -n "${LEADER_PID:-}" ]] && kill -0 "$LEADER_PID" 2>/dev/null; then
     kill -INT "$LEADER_PID" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      kill -0 "$LEADER_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$LEADER_PID" 2>/dev/null; then
+      leader_children="$(pgrep -P "$LEADER_PID" || true)"
+      [[ -z "$leader_children" ]] || kill -TERM $leader_children 2>/dev/null || true
+      kill -TERM "$LEADER_PID" 2>/dev/null || true
+    fi
     wait "$LEADER_PID" 2>/dev/null || true
   fi
 }
@@ -61,10 +70,10 @@ trap cleanup INT TERM EXIT
 # its motors were disabled (the disable service says "restart required"). Merely
 # seeing that PID and issuing RUN then produces a dangerous false-positive:
 # RUNNING in software, but no gravity compensation or motor torque.
-echo '[0/5] Verifying identical startup-pose runtime on host and Jetson...'
+echo '[0/6] Verifying identical startup-pose runtime on host and Jetson...'
 verify_runtime_builds
 
-echo '[1/5] Holding and replacing any previous teleoperation stack...'
+echo '[1/6] Holding and replacing any previous teleoperation stack...'
 remote_control hold >/dev/null 2>&1 || true
 host_pids="$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' || true)"
 if [[ -n "$host_pids" ]]; then kill -INT $host_pids 2>/dev/null || true; fi
@@ -77,14 +86,32 @@ if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-wat
   echo 'ERROR: old Jetson control stack did not stop.' >&2; exit 1
 fi
 
-echo '[2/5] Starting Jetson follower stack and controlled OpenArm initial-pose return...'
+echo '[2/6] Starting Jetson follower stack and controlled OpenArm initial-pose return...'
 ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && exec ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true' > /tmp/openarm_bimanual_follower.log 2>&1 &"
 
-echo '[3/5] Starting host leader stack and controlled OpenArm initial-pose return...'
+echo '[3/6] Waiting for both follower arms to finish initial-pose return...'
+FOLLOWER_READY=false
+for attempt in $(seq 1 45); do
+  STATUS="$(remote_control status 2>/dev/null || true)"
+  if grep -q '"right_actual_rad"' <<<"$STATUS" &&
+     grep -q '"left_actual_rad"' <<<"$STATUS" &&
+     grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
+    FOLLOWER_READY=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$FOLLOWER_READY" != true ]]; then
+  echo 'ERROR: Jetson follower homing did not become ready within 45 seconds.' >&2
+  echo 'See Jetson /tmp/openarm_bimanual_follower.log.' >&2
+  exit 1
+fi
+
+echo '[4/6] Starting host leader stack and controlled OpenArm initial-pose return...'
 ros2 launch remote_teleop_runtime bimanual_leader.launch.py "peer:=$PEER_IP" startup_home:=true "force_feedback:=$FORCE_FEEDBACK" >"$LOG_DIR/leader.log" 2>&1 &
 LEADER_PID=$!
 
-echo '[4/5] Waiting for both gateways and initial-pose return to finish...'
+echo '[5/6] Waiting for leader homing and a stable alignment window...'
 for attempt in $(seq 1 50); do
   STATUS="$(remote_control status 2>/dev/null || true)"
   if grep -q '"leader_session_id": [1-9]' <<<"$STATUS" && grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
@@ -97,9 +124,22 @@ if ! grep -q '"leader_session_id": [1-9]' <<<"${STATUS:-}"; then
   exit 1
 fi
 
-echo '[5/5] Requesting safe ALIGN, then RUN...'
-if ! remote_control align; then
-  echo 'ALIGN was rejected. Keep the arms supported, manually make both sides closer, then restart this script.' >&2
+echo '[6/6] Requesting safe ALIGN, then RUN...'
+ALIGN_OK=false
+for attempt in $(seq 1 12); do
+  ALIGN_STATUS="$(remote_control align 2>&1 || true)"
+  if grep -q '"state": "READY"' <<<"$ALIGN_STATUS"; then
+    ALIGN_OK=true
+    break
+  fi
+  if ! grep -q 'alignment must remain' <<<"$ALIGN_STATUS"; then
+    echo "$ALIGN_STATUS" >&2
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$ALIGN_OK" != true ]]; then
+  echo 'ALIGN was rejected. The follower remains in HOLD; inspect the joint mismatch above.' >&2
   exit 2
 fi
 sleep 1
