@@ -44,9 +44,12 @@ class Recorder:
         running = process is not None and process.poll() is None
         if not running:
             self.active_marker.unlink(missing_ok=True)
+            if self.dataset_root and not Path(self.dataset_root).exists():
+                self.dataset_root = None
             if self.phase in {"starting", "recording", "stopping"}:
                 returncode = None if process is None else process.returncode
-                self.phase = "idle" if returncode in {None, 0} else "error"
+                cancelled_start = bool(self.stop_reason and self.stop_reason.endswith(" during startup"))
+                self.phase = "idle" if returncode in {None, 0} or cancelled_start else "error"
         free_gb = shutil.disk_usage("/home/nvidia/datasets").free / (1024 ** 3)
         return {"running": running, "phase": self.phase,
                 "stop_reason": self.stop_reason, "free_gb": round(free_gb, 1),
@@ -92,22 +95,23 @@ class Recorder:
         if generation == self._generation:
             self.active_marker.unlink(missing_ok=True)
             with self._lock:
-                self.phase = "idle" if returncode == 0 else "error"
+                cancelled_start = bool(self.stop_reason and self.stop_reason.endswith(" during startup"))
+                self.phase = "idle" if returncode == 0 or cancelled_start else "error"
 
     def _force_stop_after_timeout(self, process: subprocess.Popen[bytes], generation: int) -> None:
         """Escalate only the recorder process group if graceful q is ignored."""
         try:
-            process.wait(timeout=15.0)
+            process.wait(timeout=5.0)
             return
         except subprocess.TimeoutExpired:
             pass
         if generation != self._generation:
             return
         with self._lock:
-            self.last_log = (self.last_log + "\nRecorder ignored q for 15 s; sent SIGINT.\n")[-4000:]
+            self.last_log = (self.last_log + "\nRecorder ignored q for 5 s; sent SIGINT.\n")[-4000:]
         try:
             os.killpg(process.pid, signal.SIGINT)
-            process.wait(timeout=5.0)
+            process.wait(timeout=2.0)
             return
         except (ProcessLookupError, subprocess.TimeoutExpired):
             pass
@@ -121,12 +125,24 @@ class Recorder:
         if process is None or process.poll() is not None:
             self.active_marker.unlink(missing_ok=True)
             return False
+        with self._lock:
+            was_starting = self.phase == "starting"
         first_request = not self._stop_requested.is_set()
         self._stop_requested.set()
         self.active_marker.unlink(missing_ok=True)
         with self._lock:
             self.phase = "stopping"
-            self.stop_reason = reason
+            self.stop_reason = f"{reason} during startup" if was_starting else reason
+        if first_request and was_starting:
+            # LeRobot initializes its keyboard handler late and flushes input;
+            # a q sent during STARTING can therefore be lost.  There is no
+            # active episode to finalize yet, so cancel the exact recorder
+            # process group immediately instead of making the operator wait.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            return True
         if first_request and self.pty_master is not None:
             try:
                 os.write(self.pty_master, b"q")

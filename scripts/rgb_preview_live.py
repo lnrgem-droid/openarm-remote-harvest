@@ -65,7 +65,10 @@ class RecordControl:
     def request(self, command: str) -> None:
         if command in {"start", "stop"}:
             with self._lock:
-                if self.phase in {"starting", "stopping"}:
+                # STOP must also be accepted while the recorder is STARTING.
+                # Previously those clicks were silently discarded for the
+                # 10-12 seconds needed to initialize LeRobot.
+                if self.phase == "stopping" or (command == "start" and self.phase == "starting"):
                     return
                 self.phase = "starting" if command == "start" else "stopping"
                 self.status = "正在启动录制…" if command == "start" else "正在停止并封口，请勿重复点击…"
@@ -142,7 +145,9 @@ def main() -> None:
     # the canvas remain Chinese.
     name = "OpenArm Live Camera Preview (Esc closes)"
     cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(name, 1280, 920)
+    # Keep window and canvas coordinates identical so the large buttons have
+    # reliable hit boxes on every desktop/window manager.
+    cv2.resizeWindow(name, 1280, 1160)
     # Qt creates the native handler on its first event cycle.  Without this
     # short pump, some desktops reject setMouseCallback with a null handler.
     cv2.waitKey(1)
@@ -161,22 +166,41 @@ def main() -> None:
     last_status_check = 0.0
     last_packet_at: dict[str, float | None] = {role: None for role in ROLES}
     display_fps: dict[str, float] = {role: 0.0 for role in ROLES}
+    poller = zmq.Poller()
+    poller.register(socket, zmq.POLLIN)
+    packet = None
+    cached_panels = None
     while True:
-        packet = json.loads(socket.recv_string())
+        # Never block the GUI on a camera/network frame.  Mouse events and the
+        # recording controls remain responsive even if preview packets stop.
+        got_packet = socket in dict(poller.poll(timeout=20))
+        if got_packet:
+            packet = json.loads(socket.recv_string())
         now = time.time()
         if now - last_status_check >= 2.0:
             control.request("status")
             last_status_check = now
-        panels = {}
-        for role in ROLES:
-            image = decode(packet["images"][role])
-            age_ms = (now - float(packet["timestamps"][role])) * 1000.0
-            previous = last_packet_at[role]
-            if previous is not None and now > previous:
-                instant_fps = 1.0 / (now - previous)
-                display_fps[role] = instant_fps if display_fps[role] == 0.0 else 0.85 * display_fps[role] + 0.15 * instant_fps
-            last_packet_at[role] = now
-            panels[role] = label(image, role, age_ms, int(packet["frame_seq"][role]), display_fps[role])
+        if packet is None:
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            continue
+        if got_packet:
+            panels = {}
+            for role in ROLES:
+                image = decode(packet["images"][role])
+                age_ms = (now - float(packet["timestamps"][role])) * 1000.0
+                previous = last_packet_at[role]
+                if previous is not None and now > previous:
+                    instant_fps = 1.0 / (now - previous)
+                    display_fps[role] = instant_fps if display_fps[role] == 0.0 else 0.85 * display_fps[role] + 0.15 * instant_fps
+                last_packet_at[role] = now
+                panels[role] = label(image, role, age_ms, int(packet["frame_seq"][role]), display_fps[role])
+            cached_panels = panels
+        else:
+            panels = cached_panels
+        if panels is None:
+            continue
         # Chest view is deliberately centred on top; the two wrist views are
         # side-by-side below, matching the operator's left/right arms.
         canvas = np.zeros((1040, 1280, 3), dtype=np.uint8)
