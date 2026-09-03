@@ -20,6 +20,7 @@ LOG = logging.getLogger("openarm_rgbd")
 ACTIVE_MARKER = Path("/tmp/openarm-rgbd-recording.active")
 ERROR_MARKER = Path("/tmp/openarm-rgbd-recording.error")
 SERVICE_LOCK = Path("/tmp/openarm-rgbd-camera-service.lock")
+STATUS_FILE = Path("/tmp/openarm-rgbd-camera-status.json")
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,21 @@ def load_specs(path: str) -> list[CameraSpec]:
     return [CameraSpec(role, roles[role]["serial"]) for role in expected]
 
 
+def write_status(payload: dict) -> None:
+    """Publish a tiny local health contract for the session recorder.
+
+    This is deliberately a file rather than another network API: it never
+    participates in teleoperation and a failed diagnostic write must never
+    interrupt camera capture.
+    """
+    try:
+        temporary = STATUS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(STATUS_FILE)
+    except OSError:
+        LOG.exception("failed to publish camera health status")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(); p.add_argument("--config", required=True)
     p.add_argument("--ipc", default="ipc:///tmp/openarm_rgbd_raw.ipc")
@@ -316,12 +332,23 @@ def main() -> None:
                     LOG.error(reason)
                 LOG.info("capture=%s preview_fps=%.1f rgbd_spool=%s spool_drop=%s spool_error=%s", status,
                          sent / elapsed, depth_spooler.written, depth_spooler.dropped, depth_spooler.error)
+                write_status({
+                    "schema_version": 1,
+                    "updated_unix_s": time.time(),
+                    "recording_active": recording,
+                    "cameras": status,
+                    "preview_fps": round(sent / elapsed, 1),
+                    "spool_written": depth_spooler.written,
+                    "spool_drop": depth_spooler.dropped,
+                    "spool_error": depth_spooler.error,
+                })
                 report, sent = now, 0
             time.sleep(0.001)
     except KeyboardInterrupt: pass
     finally:
         for camera in cameras: camera.stop()
         depth_spooler._close()
+        STATUS_FILE.unlink(missing_ok=True)
         raw.close(0); preview.close(0); ctx.term()
 
 if __name__ == "__main__": main()
