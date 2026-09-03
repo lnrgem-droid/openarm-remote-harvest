@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=启动正式蘑菇采集
+Comment=自动归零对齐并进入双臂遥操，打开三相机正式采集会话
+Exec=/home/openarm/dev/openarm-remote-harvest/scripts/open_teleop_rgbd_terminal.sh
+Terminal=false
+Categories=Utility;
