@@ -61,17 +61,20 @@ class RecordControl:
         self.started_unix_s: float | None = None
         self._lock = threading.Lock()
         self._request_lock = threading.Lock()
+        self._epoch = 0
 
     def request(self, command: str) -> None:
-        if command in {"start", "stop"}:
-            with self._lock:
+        with self._lock:
+            if command in {"start", "stop"}:
                 # STOP must also be accepted while the recorder is STARTING.
                 # Previously those clicks were silently discarded for the
                 # 10-12 seconds needed to initialize LeRobot.
                 if self.phase == "stopping" or (command == "start" and self.phase == "starting"):
                     return
+                self._epoch += 1
                 self.phase = "starting" if command == "start" else "stopping"
                 self.status = "正在启动录制…" if command == "start" else "正在停止并封口，请勿重复点击…"
+            request_epoch = self._epoch
 
         def run() -> None:
             # The recorder is a REP service: serialize requests locally too.
@@ -90,13 +93,14 @@ class RecordControl:
                 socket.send_json({"command": command})
                 response = socket.recv_json()
                 with self._lock:
+                    # Ignore only a status response that was already in flight
+                    # before a newer operator command.  Later idle responses
+                    # must be accepted so a second recording can be started.
+                    if command == "status" and request_epoch != self._epoch:
+                        return
                     self.running = bool(response.get("running", False))
                     incoming_phase = str(response.get("phase", "recording" if self.running else "idle"))
-                    # A status request that started before the user's click
-                    # must not undo the immediate local STARTING/STOPPING gate.
-                    if not (command == "status" and self.phase in {"starting", "stopping"}
-                            and incoming_phase in {"idle", "recording"}):
-                        self.phase = incoming_phase
+                    self.phase = incoming_phase
                     self.dataset_root = response.get("dataset_root")
                     self.started_unix_s = response.get("started_unix_s")
                     if self.phase == "stopping":
@@ -113,6 +117,8 @@ class RecordControl:
                         self.status += f"（{response.get('error', response.get('message', '未知错误'))}）"
             except Exception as exc:
                 with self._lock:
+                    if command == "status" and request_epoch != self._epoch:
+                        return
                     self.status = f"Jetson 录制服务未连接：{exc}"
                     if command in {"start", "stop"}:
                         self.phase = "error"

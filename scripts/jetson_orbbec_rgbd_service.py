@@ -7,7 +7,7 @@ only component allowed to open the physical Orbbec devices.
 """
 from __future__ import annotations
 
-import argparse, base64, json, logging, os, queue, threading, time
+import argparse, base64, fcntl, json, logging, os, queue, threading, time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +19,7 @@ import zmq
 LOG = logging.getLogger("openarm_rgbd")
 ACTIVE_MARKER = Path("/tmp/openarm-rgbd-recording.active")
 ERROR_MARKER = Path("/tmp/openarm-rgbd-recording.error")
+SERVICE_LOCK = Path("/tmp/openarm-rgbd-camera-service.lock")
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,13 @@ def main() -> None:
     # DepthSpooler.  Never append it globally while the camera service is idle.
     p.add_argument("--metadata-dir", default=None, help=argparse.SUPPRESS)
     args = p.parse_args(); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # A duplicate process must never unlink the active owner's IPC socket.
+    # Hold this descriptor for the complete lifetime of the camera service.
+    service_lock = SERVICE_LOCK.open("w")
+    try:
+        fcntl.flock(service_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("OpenArm RGB-D camera service is already running")
     try: os.unlink(args.ipc.removeprefix("ipc://"))
     except FileNotFoundError: pass
     cameras = [OrbbecCamera(s, 640, 480, args.fps) for s in load_specs(args.config)]
