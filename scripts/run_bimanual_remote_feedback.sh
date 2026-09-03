@@ -168,7 +168,13 @@ for attempt in $(seq 1 45); do
     exit 1
   fi
   STATUS="$(remote_control status 2>/dev/null || true)"
-  if grep -q '"right_actual_rad"' <<<"$STATUS" &&
+  # The watchdog may already report ALIGNING while gravity-PD is still
+  # executing its sequential left/right startup trajectory.  Do not start the
+  # leader, ALIGN, or print a teleoperation-ready message until *both* follower
+  # arms have explicitly completed that trajectory.
+  FOLLOWER_HOME_COUNT="$(ssh "$JETSON_HOST" "grep -c 'Startup homing command complete.' /tmp/openarm_bimanual_follower.log 2>/dev/null || true")"
+  if [[ "$FOLLOWER_HOME_COUNT" -ge 2 ]] &&
+     grep -q '"right_actual_rad"' <<<"$STATUS" &&
      grep -q '"left_actual_rad"' <<<"$STATUS" &&
      grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
     FOLLOWER_READY=true
@@ -193,7 +199,11 @@ show_stage 5 '等待主臂归位，并检查主从关节差值是否稳定' \
   '否' '保持所有机械臂不动；本步骤无需按键，程序会自动判断'
 for attempt in $(seq 1 50); do
   STATUS="$(remote_control status 2>/dev/null || true)"
-  if grep -q '"leader_session_id": [1-9]' <<<"$STATUS" && grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
+  # Same contract on the host: a live leader session alone is not evidence
+  # that both leader arms have reached and are holding INITIAL_POSITION.
+  LEADER_HOME_COUNT="$(grep -c 'Startup homing command complete.' "$LOG_DIR/leader.log" 2>/dev/null || true)"
+  if [[ "$LEADER_HOME_COUNT" -ge 2 ]] &&
+     grep -q '"leader_session_id": [1-9]' <<<"$STATUS" && grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
     break
   fi
   sleep 1
@@ -259,6 +269,16 @@ if [[ "$RUN_OK" != true ]]; then
   exit 3
 fi
 release_startup_holds
+# The RUN acknowledgement is generated before the two gravity-PD startup
+# holds are released.  Wait for that release to complete and for fresh control
+# traffic before telling the operator that it is safe to move a leader arm.
+sleep 2
+RUN_STATUS="$(remote_control status 2>/dev/null || true)"
+if ! grep -q '"state": "RUNNING"' <<<"$RUN_STATUS"; then
+  echo "ERROR: startup holds were released but RUNNING was lost." >&2
+  echo "$RUN_STATUS" >&2
+  exit 3
+fi
 printf '%s\n' "$RUN_STATUS" >"$LOG_DIR/run-status.json"
 echo
 echo '============================================================'
