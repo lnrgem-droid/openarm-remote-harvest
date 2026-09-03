@@ -56,12 +56,27 @@ class RecordControl:
         self.endpoint = f"tcp://{jetson}:{port}"
         self.status = "正在连接 Jetson 录制服务…"
         self.running = False
+        self.phase = "idle"
         self.dataset_root: str | None = None
         self.started_unix_s: float | None = None
         self._lock = threading.Lock()
+        self._request_lock = threading.Lock()
 
     def request(self, command: str) -> None:
+        if command in {"start", "stop"}:
+            with self._lock:
+                if self.phase in {"starting", "stopping"}:
+                    return
+                self.phase = "starting" if command == "start" else "stopping"
+                self.status = "正在启动录制…" if command == "start" else "正在停止并封口，请勿重复点击…"
+
         def run() -> None:
+            # The recorder is a REP service: serialize requests locally too.
+            # Periodic status polling must never race an operator stop command.
+            if command == "status" and not self._request_lock.acquire(blocking=False):
+                return
+            if command != "status":
+                self._request_lock.acquire()
             context = zmq.Context()
             socket = context.socket(zmq.REQ)
             socket.setsockopt(zmq.LINGER, 0)
@@ -73,22 +88,38 @@ class RecordControl:
                 response = socket.recv_json()
                 with self._lock:
                     self.running = bool(response.get("running", False))
+                    incoming_phase = str(response.get("phase", "recording" if self.running else "idle"))
+                    # A status request that started before the user's click
+                    # must not undo the immediate local STARTING/STOPPING gate.
+                    if not (command == "status" and self.phase in {"starting", "stopping"}
+                            and incoming_phase in {"idle", "recording"}):
+                        self.phase = incoming_phase
                     self.dataset_root = response.get("dataset_root")
                     self.started_unix_s = response.get("started_unix_s")
-                    self.status = ("录制中：Jetson 正在本地保存" if self.running else "未录制：Jetson 本地保存已停止")
+                    if self.phase == "stopping":
+                        self.status = "正在停止并封口：RGB-D写入已停止"
+                    elif self.phase == "starting":
+                        self.status = "正在启动录制…"
+                    elif self.phase == "error":
+                        self.status = "录制异常停止"
+                    else:
+                        self.status = ("录制中：Jetson 正在本地保存" if self.running else "未录制：Jetson 本地保存已停止")
+                    if response.get("stop_reason") and self.phase in {"stopping", "error"}:
+                        self.status += f"（{response['stop_reason']}）"
                     if not response.get("ok", False):
                         self.status += f"（{response.get('error', response.get('message', '未知错误'))}）"
             except Exception as exc:
                 with self._lock:
                     self.status = f"Jetson 录制服务未连接：{exc}"
-                    self.running = False
+                    if command in {"start", "stop"}:
+                        self.phase = "error"
             finally:
-                socket.close(0); context.term()
+                socket.close(0); context.term(); self._request_lock.release()
         threading.Thread(target=run, daemon=True).start()
 
-    def snapshot(self) -> tuple[str, bool, str | None, float | None]:
+    def snapshot(self) -> tuple[str, bool, str | None, float | None, str]:
         with self._lock:
-            return self.status, self.running, self.dataset_root, self.started_unix_s
+            return self.status, self.running, self.dataset_root, self.started_unix_s, self.phase
 
 
 def main() -> None:
@@ -121,10 +152,10 @@ def main() -> None:
     def on_mouse(event, x, y, _flags, _param):
         if event != cv2.EVENT_LBUTTONUP:
             return
-        _, running, _, _ = control.snapshot()
-        if start_button["x1"] <= x <= start_button["x2"] and start_button["y1"] <= y <= start_button["y2"] and not running:
+        _, running, _, _, phase = control.snapshot()
+        if start_button["x1"] <= x <= start_button["x2"] and start_button["y1"] <= y <= start_button["y2"] and not running and phase not in {"starting", "stopping"}:
             control.request("start")
-        elif stop_button["x1"] <= x <= stop_button["x2"] and stop_button["y1"] <= y <= stop_button["y2"] and running:
+        elif stop_button["x1"] <= x <= stop_button["x2"] and stop_button["y1"] <= y <= stop_button["y2"] and running and phase != "stopping":
             control.request("stop")
     cv2.setMouseCallback(name, on_mouse)
     last_status_check = 0.0
@@ -154,9 +185,11 @@ def main() -> None:
         canvas[550:1030, 640:1280] = panels["right_wrist"]
         canvas = chinese_text(canvas, "OpenArm 双臂遥操｜实时 RGB 预览（不回放，不控制机械臂）", (18, 5), 20, (220, 220, 220))
         footer = np.zeros((120, canvas.shape[1], 3), dtype=np.uint8)
-        status, running, dataset_root, started = control.snapshot()
-        cv2.rectangle(footer, (start_button["x1"], 12), (start_button["x2"], 92), (0, 145, 0) if not running else (70, 70, 70), -1)
-        cv2.rectangle(footer, (stop_button["x1"], 12), (stop_button["x2"], 92), (0, 0, 210) if running else (70, 70, 70), -1)
+        status, running, dataset_root, started, phase = control.snapshot()
+        cv2.rectangle(footer, (start_button["x1"], 12), (start_button["x2"], 92),
+                      (0, 145, 0) if not running and phase not in {"starting", "stopping"} else (70, 70, 70), -1)
+        cv2.rectangle(footer, (stop_button["x1"], 12), (stop_button["x2"], 92),
+                      (0, 0, 210) if running and phase != "stopping" else (70, 70, 70), -1)
         footer = chinese_text(footer, "开始本地录制", (start_button["x1"] + 115, 31), 27, (255, 255, 255))
         footer = chinese_text(footer, "停止并保存", (stop_button["x1"] + 135, 31), 27, (255, 255, 255))
         runtime = f"  已录制 {int(now - started)} 秒" if running and started else ""

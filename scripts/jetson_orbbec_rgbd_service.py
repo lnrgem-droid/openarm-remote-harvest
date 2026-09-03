@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse, base64, json, logging, os, queue, threading, time
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,6 +17,8 @@ import yaml
 import zmq
 
 LOG = logging.getLogger("openarm_rgbd")
+ACTIVE_MARKER = Path("/tmp/openarm-rgbd-recording.active")
+ERROR_MARKER = Path("/tmp/openarm-rgbd-recording.error")
 
 
 @dataclass(frozen=True)
@@ -122,10 +125,30 @@ class DepthSpooler:
         self.last_sequence = {role: -1 for role in roles}
         self.written = {role: 0 for role in roles}
         self.dropped = {role: 0 for role in roles}
+        self.error: str | None = None
+
+    def _fail(self, reason: str) -> None:
+        if self.error is None:
+            self.error = reason
+            LOG.error("RGB-D spool stopped: %s", reason)
+            try:
+                ERROR_MARKER.write_text(reason + "\n", encoding="utf-8")
+            except OSError:
+                LOG.exception("failed to write RGB-D error marker")
+        ACTIVE_MARKER.unlink(missing_ok=True)
 
     def _close(self) -> None:
         for item_queue in self.queues.values():
-            item_queue.put(None)
+            # A dead writer may leave a full queue. Shutdown must not block.
+            while True:
+                try:
+                    item_queue.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                item_queue.put_nowait(None)
+            except queue.Full:
+                pass
         for worker in self.workers.values():
             worker.join(timeout=10.0)
         for stream in [*self.data.values(), *self.rgb.values(), *self.meta.values()]:
@@ -138,20 +161,23 @@ class DepthSpooler:
             item = item_queue.get()
             if item is None:
                 return
-            header, rgb, depth = item
-            rgb_offset = self.rgb[role].tell(); depth_offset = self.data[role].tell()
-            self.rgb[role].write(rgb.tobytes()); self.data[role].write(depth.tobytes())
-            record = dict(header)
-            record.update({"rgb_storage": "rgb24", "rgb_offset_bytes": rgb_offset,
-                           "rgb_nbytes": int(rgb.nbytes), "storage": "u16le",
-                           "offset_bytes": depth_offset, "nbytes": int(depth.nbytes)})
-            self.meta[role].write(json.dumps(record) + "\n")
-            self.written[role] += 1
+            try:
+                header, rgb, depth = item
+                rgb_offset = self.rgb[role].tell(); depth_offset = self.data[role].tell()
+                self.rgb[role].write(rgb.tobytes()); self.data[role].write(depth.tobytes())
+                record = dict(header)
+                record.update({"rgb_storage": "rgb24", "rgb_offset_bytes": rgb_offset,
+                               "rgb_nbytes": int(rgb.nbytes), "storage": "u16le",
+                               "offset_bytes": depth_offset, "nbytes": int(depth.nbytes)})
+                self.meta[role].write(json.dumps(record) + "\n")
+                self.written[role] += 1
+            except OSError as exc:
+                self._fail(f"{role} RGB-D write failed: {exc}")
+                return
 
     def update(self, latest: dict) -> None:
-        marker = "/tmp/openarm-rgbd-recording.active"
         try:
-            with open(marker, encoding="utf-8") as f:
+            with ACTIVE_MARKER.open(encoding="utf-8") as f:
                 root = f.read().strip()
         except FileNotFoundError:
             if self.root is not None:
@@ -167,6 +193,7 @@ class DepthSpooler:
             rgb_out = os.path.join(root, "rgb_raw")
             os.makedirs(rgb_out, exist_ok=True)
             self.root = root
+            self.error = None
             self.data = {role: open(os.path.join(out, f"{role}.u16le"), "ab", buffering=1024 * 1024) for role in self.roles}
             self.rgb = {role: open(os.path.join(rgb_out, f"{role}.rgb24"), "ab", buffering=1024 * 1024) for role in self.roles}
             self.meta = {role: open(os.path.join(out, f"{role}.jsonl"), "a", buffering=1024 * 1024) for role in self.roles}
@@ -207,15 +234,15 @@ def main() -> None:
     # teleoperation while leaving the 30 FPS RGB-D recording path priority.
     p.add_argument("--preview-fps", type=int, default=15); p.add_argument("--record-preview-fps", type=int, default=10)
     p.add_argument("--quality", type=int, default=75)
-    p.add_argument("--metadata-dir", default="/tmp/openarm-rgbd-metadata")
+    # Kept for command-line compatibility only.  Per-frame metadata belongs
+    # beside the RGB-D payload inside each dataset and is written by
+    # DepthSpooler.  Never append it globally while the camera service is idle.
+    p.add_argument("--metadata-dir", default=None, help=argparse.SUPPRESS)
     args = p.parse_args(); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try: os.unlink(args.ipc.removeprefix("ipc://"))
     except FileNotFoundError: pass
     cameras = [OrbbecCamera(s, 640, 480, args.fps) for s in load_specs(args.config)]
     for camera in cameras: camera.start()
-    os.makedirs(args.metadata_dir, exist_ok=True)
-    metadata = {camera.spec.role: open(os.path.join(args.metadata_dir, f"{camera.spec.role}.jsonl"), "a", buffering=1)
-                for camera in cameras}
     depth_spooler = DepthSpooler(tuple(camera.spec.role for camera in cameras))
     ctx = zmq.Context(); raw = ctx.socket(zmq.PUB); raw.setsockopt(zmq.SNDHWM, 12); raw.bind(args.ipc)
     preview = ctx.socket(zmq.PUB); preview.setsockopt(zmq.SNDHWM, 1); preview.setsockopt(zmq.LINGER, 0)
@@ -238,11 +265,10 @@ def main() -> None:
                         raw.send_multipart([f"rgb/{camera.spec.role}".encode(), json.dumps(header).encode(), rgb.tobytes()], flags=zmq.NOBLOCK)
                     except zmq.Again:
                         camera.dropped += 1
-                    metadata[camera.spec.role].write(json.dumps(header) + "\n")
                     last_seq[camera.spec.role] = header["frame_sequence"]
             now = time.monotonic()
             depth_spooler.update(latest)
-            recording = os.path.exists("/tmp/openarm-rgbd-recording.active")
+            recording = ACTIVE_MARKER.exists()
             effective_preview_fps = args.record_preview_fps if recording else args.preview_fps
             if now >= next_preview and len(latest) == 3:
                 message = {"schema_version": 1, "timestamps": {}, "frame_seq": {}, "images": {}}
@@ -271,15 +297,23 @@ def main() -> None:
                         "error": camera.last_error,
                     }
                     report_counts[camera.spec.role] = camera.count
-                LOG.info("capture=%s preview_fps=%.1f rgbd_spool=%s spool_drop=%s", status,
-                         sent / elapsed, depth_spooler.written, depth_spooler.dropped)
+                unhealthy = [role for role, value in status.items() if not value["healthy"]]
+                if recording and unhealthy:
+                    reason = "recording stopped: unhealthy camera(s): " + ", ".join(unhealthy)
+                    try:
+                        ERROR_MARKER.write_text(reason + "\n", encoding="utf-8")
+                    except OSError:
+                        LOG.exception("failed to write camera-health error marker")
+                    ACTIVE_MARKER.unlink(missing_ok=True)
+                    LOG.error(reason)
+                LOG.info("capture=%s preview_fps=%.1f rgbd_spool=%s spool_drop=%s spool_error=%s", status,
+                         sent / elapsed, depth_spooler.written, depth_spooler.dropped, depth_spooler.error)
                 report, sent = now, 0
             time.sleep(0.001)
     except KeyboardInterrupt: pass
     finally:
         for camera in cameras: camera.stop()
         depth_spooler._close()
-        for stream in metadata.values(): stream.close()
         raw.close(0); preview.close(0); ctx.term()
 
 if __name__ == "__main__": main()
