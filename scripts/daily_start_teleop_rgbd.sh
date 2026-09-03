@@ -190,11 +190,12 @@ trap 'exit 143' TERM
 say "5/5 打开主机实时预览"
 echo "  机械臂可能运动：是（遥操继续运行）"
 echo "  现在可以遥操：是"
-echo "当前只打开实时预览，不会自动录制。"
-echo "点击绿色“开始本地录制”才开始；点击红色“停止并保存”一次即可结束。"
+echo "当前只打开实时预览和正式采集会话界面，不会自动录制。"
+echo "选择任务后点击“开始本 episode”；结束时明确选择成功、失败或中止。"
 echo "停止录制只停止数据保存，不会停止机械臂遥操。"
+echo "若窗口意外关闭，会安全结束当前 episode，但绝不会停止机械臂遥操。"
 echo "相机预览和本地录制独立运行；遥操故障不会再关闭采图窗口。"
 QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu \
-  /home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" \
-    --jetson "$PEER_IP" --port 5556 \
+  /home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgbd_collection_console.py" \
+    --jetson "$PEER_IP" --preview-port 5556 --record-port 5557 \
     2> >(grep -v -E '^(QFontDatabase: Cannot find font directory|Note that Qt no longer ships fonts)' >&2)
