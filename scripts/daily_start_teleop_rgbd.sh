@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Daily operator entrypoint: teleoperation + Jetson-local RGB-D recording.
+# Daily operator entrypoint: teleoperation + RGB-D preview.
+# Recording is started only by the operator button in the preview window.
 set -euo pipefail
 
 TELEOP_ROOT="/home/openarm/dev/openarm-remote-harvest"
@@ -55,11 +56,17 @@ runtime=/home/nvidia/openarm-rgbd-runtime
 root=/home/nvidia/dev/openarm-rgbd-preview
 mkdir -p "$runtime"
 alive() { test -f "$1" && kill -0 "$(cat "$1")" 2>/dev/null; }
-if ! alive "$runtime/camera-service.pid"; then
+camera_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_orbbec_rgbd_service.py" | head -n1 || true)
+if test -n "$camera_pid"; then
+  echo "$camera_pid" >"$runtime/camera-service.pid"
+elif ! alive "$runtime/camera-service.pid"; then
   echo "启动 Jetson 三相机服务…"
   nohup bash "$root/scripts/start_jetson_rgbd_service.sh" >"$runtime/camera-service.log" 2>&1 & echo $! >"$runtime/camera-service.pid"
 fi
-if ! alive "$runtime/record-manager.pid"; then
+manager_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_record_manager.py" | head -n1 || true)
+if test -n "$manager_pid"; then
+  echo "$manager_pid" >"$runtime/record-manager.pid"
+elif ! alive "$runtime/record-manager.pid"; then
   echo "启动 Jetson 录制管理服务…"
   nohup bash "$root/scripts/start_jetson_record_manager.sh" >"$runtime/record-manager.log" 2>&1 & echo $! >"$runtime/record-manager.pid"
 fi
@@ -83,22 +90,6 @@ done
 test -S /tmp/openarm_rgbd_raw.ipc'
 }
 
-start_recording() {
-  ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"'
-import sys, zmq
-c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 5000); s.connect("tcp://127.0.0.1:5557")
-s.send_json({"command":"status"}); status=s.recv_json()
-if status.get("running"):
-    print("ERROR: a recording is already running: " + str(status.get("dataset_root")), file=sys.stderr)
-    sys.exit(3)
-s.close(0); c.term()
-c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 5000); s.connect("tcp://127.0.0.1:5557")
-s.send_json({"command":"start"}); reply=s.recv_json(); print(reply)
-if not reply.get("ok") or not reply.get("running"):
-    sys.exit(4)
-PY'
-}
-
 stop_recording_on_exit() {
   # Closing the preview window must not leave a hidden recording running.
   ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"' || true
@@ -107,6 +98,31 @@ c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 2000); s.connec
 s.send_json({"command":"status"}); status=s.recv_json()
 if status.get("running"):
     s.close(0); c.term(); c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557"); s.send_json({"command":"stop"}); print(s.recv_json())
+PY'
+}
+
+ensure_recording_idle() {
+  # A previous UI crash must not make a newly opened window look as if it
+  # started recording by itself.  Finish any orphaned recorder first.
+  ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"'
+import time, zmq
+endpoint = "tcp://127.0.0.1:5557"
+def request(command):
+    context = zmq.Context(); socket = context.socket(zmq.REQ)
+    socket.setsockopt(zmq.LINGER, 0); socket.setsockopt(zmq.RCVTIMEO, 3000)
+    socket.connect(endpoint); socket.send_json({"command": command})
+    response = socket.recv_json(); socket.close(0); context.term(); return response
+status = request("status")
+if status.get("running"):
+    print("发现上次遗留录制，正在停止并保存：" + str(status.get("dataset_root")))
+    request("stop")
+    for _ in range(12):
+        time.sleep(1); status = request("status")
+        if not status.get("running"):
+            break
+if status.get("running"):
+    raise SystemExit("ERROR: 遗留录制未能停止，请查看 Jetson 录制日志")
+print("录制状态：未录制（等待界面按钮）")
 PY'
 }
 
@@ -136,13 +152,14 @@ for n in $(seq 1 60); do
 done
 grep -q '"state": "RUNNING"' <<<"${status:-}" || { echo "ERROR: 遥操未在 60 秒内进入 RUNNING。查看 $LOG_DIR/teleop.log" >&2; exit 1; }
 echo "遥操已进入 RUNNING，左右臂开始一一对应跟随。"
-say "4/5 开始 Jetson 本地 RGB-D 采集"
+say "4/5 准备 Jetson 本地 RGB-D 采集"
+ensure_recording_idle
 trap stop_recording_on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-start_recording
 say "5/5 打开主机实时预览"
-echo "采集已开始。点击窗口红色“停止并保存”结束；关闭窗口也会请求停止本次录制。"
+echo "当前只打开实时预览，不会自动录制。"
+echo "点击绿色“开始本地录制”才开始；点击红色“停止并保存”一次即可结束。"
 echo "相机预览和本地录制独立运行；遥操故障不会再关闭采图窗口。"
 QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu \
   /home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" \

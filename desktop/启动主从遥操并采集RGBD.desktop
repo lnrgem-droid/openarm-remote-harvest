@@ -1,8 +1,8 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=启动主从遥操并采集 RGB-D
-Comment=检查网络和 CAN，启动遥操、三相机预览与 Jetson 本地录制
+Name=启动主从遥操与 RGB-D 采集界面
+Comment=启动遥操和三相机预览；仅在点击开始录制后保存到 Jetson
 Exec=/home/openarm/dev/openarm-remote-harvest/scripts/open_teleop_rgbd_terminal.sh
 Terminal=false
 Categories=Utility;
