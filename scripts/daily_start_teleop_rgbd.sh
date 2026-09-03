@@ -137,21 +137,36 @@ PY'
 }
 
 say "1/5 检查主机 CAN 与网络"
+echo "  机械臂可能运动：否（本步骤只检查主机 CAN、网线、IP 和 SSH）"
+echo "  现在可以遥操：否"
+echo "  你现在应当：保持机械臂静止，等待检查完成"
 ensure_host_can
 ping -c 2 -W 1 "$PEER_IP"
 ssh -o ConnectTimeout=8 "$JETSON_HOST" 'hostname; uptime -p'
 say "2/5 检查 Jetson 从臂 CAN 与 RGB-D 服务"
+echo "  机械臂可能运动：否（本步骤只检查 CAN、相机和录制服务）"
+echo "  现在可以遥操：否"
+echo "  你现在应当：保持从臂周围无人和无障碍物"
 ensure_jetson_can
 ensure_jetson_rgbd_services
 say "3/5 启动受控双臂遥操"
+echo "  机械臂可能运动：是；主从左右臂将依次自动回到初始位"
+echo "  现在可以遥操：否"
+echo "  你现在应当：不要触碰机械臂，无需按键，等待终端显示 RUNNING"
 [[ -f "$TELEOP_CORE" ]] || { echo "ERROR: 遥操核心脚本不存在：$TELEOP_CORE" >&2; exit 1; }
 echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_CORE"
 # The detached teleop process must not inherit descriptor 9. Otherwise it keeps
 # the daily-start lock forever after this UI/recording wrapper exits.
 nohup bash "$TELEOP_CORE" >"$LOG_DIR/teleop.log" 2>&1 9>&- &
 teleop_pid=$!
+progress_count=0
 for n in $(seq 1 60); do
   status=$(teleop_status)
+  mapfile -t progress_lines < <(grep -E '^\[[0-6]/6\]' "$LOG_DIR/teleop.log" 2>/dev/null || true)
+  while (( progress_count < ${#progress_lines[@]} )); do
+    echo "  遥操启动进度：${progress_lines[$progress_count]}"
+    progress_count=$((progress_count + 1))
+  done
   if grep -q '"state": "RUNNING"' <<<"$status"; then break; fi
   if ! kill -0 "$teleop_pid" 2>/dev/null; then
     echo "ERROR: 遥操启动脚本已退出，未进入 RUNNING。最后日志如下：" >&2
@@ -161,16 +176,25 @@ for n in $(seq 1 60); do
   sleep 1
 done
 grep -q '"state": "RUNNING"' <<<"${status:-}" || { echo "ERROR: 遥操未在 60 秒内进入 RUNNING。查看 $LOG_DIR/teleop.log" >&2; exit 1; }
-echo "遥操已进入 RUNNING，左右臂开始一一对应跟随。"
+echo "  机械臂可能运动：是；从臂会跟随主臂"
+echo "  现在可以遥操：是"
+echo "  遥操状态：RUNNING，左右臂开始一一对应跟随。"
 say "4/5 准备 Jetson 本地 RGB-D 采集"
+echo "  机械臂可能运动：是（遥操继续运行，本步骤不会额外驱动机械臂）"
+echo "  现在可以遥操：是"
+echo "  你现在应当：等待确认录制状态；此时不会自动开始录制"
 ensure_recording_idle
 trap stop_recording_on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 say "5/5 打开主机实时预览"
+echo "  机械臂可能运动：是（遥操继续运行）"
+echo "  现在可以遥操：是"
 echo "当前只打开实时预览，不会自动录制。"
 echo "点击绿色“开始本地录制”才开始；点击红色“停止并保存”一次即可结束。"
+echo "停止录制只停止数据保存，不会停止机械臂遥操。"
 echo "相机预览和本地录制独立运行；遥操故障不会再关闭采图窗口。"
 QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu \
   /home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgb_preview_live.py" \
-    --jetson "$PEER_IP" --port 5556
+    --jetson "$PEER_IP" --port 5556 \
+    2> >(grep -v -E '^(QFontDatabase: Cannot find font directory|Note that Qt no longer ships fonts)' >&2)

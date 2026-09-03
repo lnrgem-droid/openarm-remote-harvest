@@ -58,14 +58,26 @@ PY'
 }
 
 say "1/4 检查主机 CAN"
+echo "  机械臂可能运动：否（本步骤只读取/配置主机 CAN）"
+echo "  现在可以遥操：否"
+echo "  你现在应当：保持机械臂静止"
 ensure_host_can
 say "2/4 检查主机与 Jetson 网络"
+echo "  机械臂可能运动：否（本步骤只检查网线、IP 和 SSH）"
+echo "  现在可以遥操：否"
+echo "  你现在应当：无需操作，等待网络检查完成"
 ping -c 2 -W 1 "$PEER_IP"
 ssh -o ConnectTimeout=8 "$JETSON_HOST" 'hostname; uptime -p'
 say "3/4 检查 Jetson 从臂 CAN"
+echo "  机械臂可能运动：否（本步骤只读取/配置 Jetson CAN）"
+echo "  现在可以遥操：否"
+echo "  你现在应当：保持从臂周围无人和无障碍物"
 ensure_jetson_can
 say "4/4 确认未采集并启动受控遥操"
+echo "  机械臂可能运动：即将会；下一阶段主从臂都会自动回初始位"
+echo "  现在可以遥操：否"
+echo "  你现在应当：两人就位、急停可用，然后等待终端明确显示可以遥操"
 ensure_no_recording
 
-echo "通过检查。即将自动归零、对齐并进入 RUNNING；请确认两人就位、急停可用。"
+echo "检查通过。无需按键，程序将自动归零、对齐并进入 RUNNING。"
 exec bash "$ROOT_DIR/scripts/run_bimanual_remote_feedback.sh"

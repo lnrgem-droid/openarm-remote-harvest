@@ -40,8 +40,16 @@ remote_control() {
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control $command"
 }
 
+show_stage() {
+  local number="$1" title="$2" motion="$3" control="$4" action="$5"
+  printf '\n[%s/6] %s\n' "$number" "$title"
+  printf '  机械臂可能运动：%s\n' "$motion"
+  printf '  现在可以遥操：%s\n' "$control"
+  printf '  你现在应当：%s\n' "$action"
+}
+
 release_startup_holds() {
-  echo 'Releasing startup-pose holds after RUNNING acknowledgement...'
+  echo '  正在解除主臂和从臂的启动位保持，准备接受实时遥操指令…'
   ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /leader/openarm_gravity_pd/startup_hold \
     std_srvs/srv/SetBool '{data: false}' >/dev/null
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /follower/openarm_gravity_pd/startup_hold std_srvs/srv/SetBool '{data: false}' >/dev/null"
@@ -120,10 +128,18 @@ trap cleanup INT TERM EXIT
 # its motors were disabled (the disable service says "restart required"). Merely
 # seeing that PID and issuing RUN then produces a dangerous false-positive:
 # RUNNING in software, but no gravity compensation or motor torque.
-echo '[0/6] Verifying identical startup-pose runtime on host and Jetson...'
+echo '============================================================'
+echo 'OpenArm 双机双臂启动：主机主臂 can0/can1 → Jetson 从臂 can1/can2'
+echo '只有终端明确显示“现在可以遥操：是”以后，才能移动主机械臂。'
+echo '============================================================'
+show_stage 0 '检查主机与 Jetson 是否使用同一套归零程序' \
+  '本步骤不发送新动作；若旧遥操仍在运行，旧控制仍可能生效' \
+  '否' '保持四条机械臂静止，确认急停可用'
 verify_runtime_builds
 
-echo '[1/6] Holding and replacing any previous teleoperation stack...'
+show_stage 1 '让旧遥操进入保持，并关闭旧控制进程' \
+  '可能；切换保持或重启控制器时力矩手感可能变化' \
+  '否' '不要推动主臂或从臂，人员在从臂旁监护'
 remote_control hold >/dev/null 2>&1 || true
 host_pids="$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' || true)"
 if [[ -n "$host_pids" ]]; then kill -INT $host_pids 2>/dev/null || true; fi
@@ -136,10 +152,14 @@ if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-wat
   echo 'ERROR: old Jetson control stack did not stop.' >&2; exit 1
 fi
 
-echo '[2/6] Starting Jetson follower stack and controlled OpenArm initial-pose return...'
+show_stage 2 '启动 Jetson 从臂控制，并让左右从臂自动回到初始位' \
+  '是；左右从臂会自动运动回初始位' \
+  '否' '远离运动范围，不要拖动任何机械臂，随时准备急停'
 ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && exec taskset --cpu-list $JETSON_CONTROL_CPUSET ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true' > /tmp/openarm_bimanual_follower.log 2>&1 &"
 
-echo '[3/6] Waiting for both follower arms to finish initial-pose return...'
+show_stage 3 '等待左右从臂完成回初始位并进入 ALIGNING' \
+  '是；从臂可能仍在缓慢归位' \
+  '否' '继续等待，不要提前移动主臂；本步骤无需按键'
 FOLLOWER_READY=false
 for attempt in $(seq 1 45); do
   if ssh "$JETSON_HOST" "grep -q 'process has died' /tmp/openarm_bimanual_follower.log 2>/dev/null"; then
@@ -162,11 +182,15 @@ if [[ "$FOLLOWER_READY" != true ]]; then
   exit 1
 fi
 
-echo '[4/6] Starting host leader stack and controlled OpenArm initial-pose return...'
+show_stage 4 '启动主机主臂控制，并让左右主臂自动回到初始位' \
+  '是；左右主臂会自动运动回初始位' \
+  '否' '松开主臂并远离夹点，等待自动归位完成'
 ros2 launch remote_teleop_runtime bimanual_leader.launch.py "peer:=$PEER_IP" startup_home:=true "force_feedback:=$FORCE_FEEDBACK" >"$LOG_DIR/leader.log" 2>&1 &
 LEADER_PID=$!
 
-echo '[5/6] Waiting for leader homing and a stable alignment window...'
+show_stage 5 '等待主臂归位，并检查主从关节差值是否稳定' \
+  '可能；主臂可能仍在归位，主从两端随后保持当前位置' \
+  '否' '保持所有机械臂不动；本步骤无需按键，程序会自动判断'
 for attempt in $(seq 1 50); do
   STATUS="$(remote_control status 2>/dev/null || true)"
   if grep -q '"leader_session_id": [1-9]' <<<"$STATUS" && grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
@@ -179,7 +203,9 @@ if ! grep -q '"leader_session_id": [1-9]' <<<"${STATUS:-}"; then
   exit 1
 fi
 
-echo '[6/6] Requesting safe ALIGN, then RUN...'
+show_stage 6 '自动执行 ALIGN，并请求进入 RUNNING' \
+  '可能；RUNNING 生效后从臂将开始跟随主臂' \
+  '暂时不可以' '保持主臂静止，等候最终绿色提示'
 ALIGN_OK=false
 for attempt in $(seq 1 12); do
   ALIGN_REPLY="$(remote_control align 2>&1 || true)"
@@ -233,6 +259,14 @@ if [[ "$RUN_OK" != true ]]; then
   exit 3
 fi
 release_startup_holds
-echo "$RUN_STATUS"
-echo 'Bimanual remote teleoperation is RUNNING. Press Ctrl+C for HOLD (then support arms before disable).'
+printf '%s\n' "$RUN_STATUS" >"$LOG_DIR/run-status.json"
+echo
+echo '============================================================'
+echo '启动完成：状态 RUNNING，左右主从臂已建立一一对应跟随。'
+echo '  机械臂可能运动：是；从臂会跟随主臂，力反馈也已启用'
+echo '  现在可以遥操：是'
+echo '  你现在应当：先小幅、低速移动主臂，确认方向正确后再正常操作'
+echo '  停止方式：按 Ctrl+C 将从臂切换到位置保持；不要直接断电'
+echo "  完整运行状态：$LOG_DIR/run-status.json"
+echo '============================================================'
 wait "$LEADER_PID"
