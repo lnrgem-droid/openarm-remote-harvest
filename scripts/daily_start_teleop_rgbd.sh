@@ -57,6 +57,16 @@ root=/home/nvidia/dev/openarm-rgbd-preview
 mkdir -p "$runtime"
 alive() { test -f "$1" && kill -0 "$(cat "$1")" 2>/dev/null; }
 camera_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_orbbec_rgbd_service.py" | head -n1 || true)
+if test -n "$camera_pid" && ! test -S /tmp/openarm_rgbd_raw.ipc; then
+  echo "相机进程存在但本地采集 IPC 丢失，正在自动重启修复…"
+  kill -TERM "$camera_pid" 2>/dev/null || true
+  for n in $(seq 1 20); do
+    kill -0 "$camera_pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  camera_pid=""
+  rm -f "$runtime/camera-service.pid"
+fi
 if test -n "$camera_pid"; then
   echo "$camera_pid" >"$runtime/camera-service.pid"
 elif ! alive "$runtime/camera-service.pid"; then
