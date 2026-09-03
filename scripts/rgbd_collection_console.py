@@ -95,6 +95,29 @@ class SessionControl:
     def snapshot(self) -> tuple[dict[str, Any], str, bool]:
         with self.lock: return dict(self.value), self.message, self.pending
 
+    def stop_active_episode_before_exit(self) -> None:
+        """Best-effort synchronous stop for a window close.
+
+        The daily launcher also has a shell-level guard, but keeping this in
+        the GUI itself makes a direct/manual launch equally safe.  It affects
+        only recorder persistence, never the independent teleoperation stack.
+        """
+        context = zmq.Context(); sock = context.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0); sock.setsockopt(zmq.SNDTIMEO, 2000); sock.setsockopt(zmq.RCVTIMEO, 3000)
+        try:
+            sock.connect(self.endpoint); sock.send_json({"command": "status"}); state = sock.recv_json()
+            if state.get("running"):
+                sock.close(0); context.term()
+                context = zmq.Context(); sock = context.socket(zmq.REQ)
+                sock.setsockopt(zmq.LINGER, 0); sock.setsockopt(zmq.SNDTIMEO, 2000); sock.setsockopt(zmq.RCVTIMEO, 3000)
+                sock.connect(self.endpoint)
+                sock.send_json({"command": "episode_stop", "result": "aborted", "failure_code": "collection_window_closed"})
+                sock.recv_json()
+        except Exception:
+            pass
+        finally:
+            sock.close(0); context.term()
+
 
 def button(canvas: np.ndarray, box: tuple[int, int, int, int], title: str, color: tuple[int, int, int], enabled: bool) -> np.ndarray:
     x1, y1, x2, y2 = box
@@ -176,18 +199,19 @@ def main() -> None:
         footer = chinese(footer, f"会话：{session}    相机：{'三路健康' if camera_ok else '等待三路相机健康'}    遥操：由独立遥操程序持续控制", (22, 7), 18, (0, 255, 255))
         footer = chinese(footer, "选择当前任务（只影响本 episode 的元数据）：", (25, 75), 18, (220, 220, 220))
         for index, (code, label) in enumerate(TASKS):
-            button(footer, footer_box(task_boxes[index]), f"{code}  {label}", (35, 105, 180) if index == task_index else (75, 75, 75), not running and not pending)
-        button(footer, footer_box(close_box), "结束采集会话", (80, 80, 80), not running and not pending)
-        button(footer, footer_box(start_box), "开始本 episode", (0, 145, 0), not running and camera_ok and not pending)
-        button(footer, footer_box(success_box), "成功并保存", (0, 125, 0), running and not pending)
-        button(footer, footer_box(failure_box), "失败并保存", (0, 80, 200), running and not pending)
-        button(footer, footer_box(abort_box), "中止", (100, 70, 30), running and not pending)
+            footer = button(footer, footer_box(task_boxes[index]), f"{code}  {label}", (35, 105, 180) if index == task_index else (75, 75, 75), not running and not pending)
+        footer = button(footer, footer_box(close_box), "结束采集会话", (80, 80, 80), not running and not pending)
+        footer = button(footer, footer_box(start_box), "开始本 episode", (0, 145, 0), not running and camera_ok and not pending)
+        footer = button(footer, footer_box(success_box), "成功并保存", (0, 125, 0), running and not pending)
+        footer = button(footer, footer_box(failure_box), "失败并保存", (0, 80, 200), running and not pending)
+        footer = button(footer, footer_box(abort_box), "中止", (100, 70, 30), running and not pending)
         elapsed = f"  已录制 {int(now - state['started_unix_s'])} 秒" if running and state.get("started_unix_s") else ""
         footer = chinese(footer, message + elapsed, (22, 187), 17, (0, 255, 255))
         cv2.imshow(title, cv2.vconcat([canvas, footer]))
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
             break
+    control.stop_active_episode_before_exit()
     stream.close(0); context.term(); cv2.destroyAllWindows()
 
 
