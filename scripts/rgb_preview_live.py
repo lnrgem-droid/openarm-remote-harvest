@@ -15,25 +15,9 @@ import time
 import cv2
 import numpy as np
 import zmq
-from PIL import Image, ImageDraw, ImageFont
 
 
 ROLES = ("left_wrist", "right_wrist", "chest")
-TITLES = {
-    "chest": "胸部全局相机",
-    "left_wrist": "左腕相机",
-    "right_wrist": "右腕相机",
-}
-FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-
-
-def chinese_text(image: np.ndarray, text: str, xy: tuple[int, int], size: int,
-                 color: tuple[int, int, int]) -> np.ndarray:
-    """Draw UTF-8 operator labels; cv2.putText cannot render Chinese."""
-    canvas = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(canvas)
-    draw.text(xy, text, font=ImageFont.truetype(FONT_PATH, size), fill=color)
-    return cv2.cvtColor(np.asarray(canvas), cv2.COLOR_RGB2BGR)
 
 
 def decode(encoded: str) -> np.ndarray:
@@ -44,45 +28,23 @@ def decode(encoded: str) -> np.ndarray:
     return image
 
 
-def label(image: np.ndarray, role: str, age_ms: float, sequence: int, fps: float) -> np.ndarray:
+def label(image: np.ndarray, role: str, age_ms: float, sequence: int) -> np.ndarray:
     panel = image.copy()
-    cv2.rectangle(panel, (0, 0), (panel.shape[1], 44), (0, 0, 0), -1)
-    return chinese_text(panel, f"{TITLES[role]}  实时 {fps:.1f} FPS  延迟 {age_ms:.0f} ms  帧 {sequence}",
-                        (10, 8), 19, (0, 255, 0))
+    text = f"{role} | LIVE | {age_ms:.0f} ms | #{sequence}"
+    cv2.rectangle(panel, (0, 0), (panel.shape[1], 34), (0, 0, 0), -1)
+    cv2.putText(panel, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+    return panel
 
 
 class RecordControl:
     def __init__(self, jetson: str, port: int) -> None:
         self.endpoint = f"tcp://{jetson}:{port}"
-        self.status = "正在连接 Jetson 录制服务…"
+        self.status = "RECORDER: checking..."
         self.running = False
-        self.phase = "idle"
-        self.dataset_root: str | None = None
-        self.started_unix_s: float | None = None
         self._lock = threading.Lock()
-        self._request_lock = threading.Lock()
-        self._epoch = 0
 
     def request(self, command: str) -> None:
-        with self._lock:
-            if command in {"start", "stop"}:
-                # STOP must also be accepted while the recorder is STARTING.
-                # Previously those clicks were silently discarded for the
-                # 10-12 seconds needed to initialize LeRobot.
-                if self.phase == "stopping" or (command == "start" and self.phase == "starting"):
-                    return
-                self._epoch += 1
-                self.phase = "starting" if command == "start" else "stopping"
-                self.status = "正在启动录制…" if command == "start" else "正在停止并封口，请勿重复点击…"
-            request_epoch = self._epoch
-
         def run() -> None:
-            # The recorder is a REP service: serialize requests locally too.
-            # Periodic status polling must never race an operator stop command.
-            if command == "status" and not self._request_lock.acquire(blocking=False):
-                return
-            if command != "status":
-                self._request_lock.acquire()
             context = zmq.Context()
             socket = context.socket(zmq.REQ)
             socket.setsockopt(zmq.LINGER, 0)
@@ -93,42 +55,20 @@ class RecordControl:
                 socket.send_json({"command": command})
                 response = socket.recv_json()
                 with self._lock:
-                    # Ignore only a status response that was already in flight
-                    # before a newer operator command.  Later idle responses
-                    # must be accepted so a second recording can be started.
-                    if command == "status" and request_epoch != self._epoch:
-                        return
                     self.running = bool(response.get("running", False))
-                    incoming_phase = str(response.get("phase", "recording" if self.running else "idle"))
-                    self.phase = incoming_phase
-                    self.dataset_root = response.get("dataset_root")
-                    self.started_unix_s = response.get("started_unix_s")
-                    if self.phase == "stopping":
-                        self.status = "正在停止并封口：RGB-D写入已停止"
-                    elif self.phase == "starting":
-                        self.status = "正在启动录制…"
-                    elif self.phase == "error":
-                        self.status = "录制异常停止"
-                    else:
-                        self.status = ("录制中：Jetson 正在本地保存" if self.running else "未录制：Jetson 本地保存已停止")
-                    if response.get("stop_reason") and self.phase in {"stopping", "error"}:
-                        self.status += f"（{response['stop_reason']}）"
-                    if not response.get("ok", False):
-                        self.status += f"（{response.get('error', response.get('message', '未知错误'))}）"
+                    self.status = ("RECORDER: " + ("RUNNING" if self.running else "IDLE")
+                                   + (f" — {response.get('error', response.get('message', 'ready'))}" if not response.get("ok", False) else ""))
             except Exception as exc:
                 with self._lock:
-                    if command == "status" and request_epoch != self._epoch:
-                        return
-                    self.status = f"Jetson 录制服务未连接：{exc}"
-                    if command in {"start", "stop"}:
-                        self.phase = "error"
+                    self.status = f"RECORDER OFFLINE: {exc}"
+                    self.running = False
             finally:
-                socket.close(0); context.term(); self._request_lock.release()
+                socket.close(0); context.term()
         threading.Thread(target=run, daemon=True).start()
 
-    def snapshot(self) -> tuple[str, bool, str | None, float | None, str]:
+    def snapshot(self) -> tuple[str, bool]:
         with self._lock:
-            return self.status, self.running, self.dataset_root, self.started_unix_s, self.phase
+            return self.status, self.running
 
 
 def main() -> None:
@@ -146,87 +86,33 @@ def main() -> None:
 
     control = RecordControl(args.jetson, args.record_port)
     control.request("status")
-    # OpenCV Qt on this host does not create a callback-capable native window
-    # when the window title contains CJK text.  Operator-facing labels inside
-    # the canvas remain Chinese.
-    name = "OpenArm Live Camera Preview (Esc closes)"
+    name = "OpenArm LIVE RGB Preview  (q/Esc: close)"
     cv2.namedWindow(name, cv2.WINDOW_NORMAL)
-    # Keep window and canvas coordinates identical so the large buttons have
-    # reliable hit boxes on every desktop/window manager.
-    cv2.resizeWindow(name, 1280, 1160)
-    # Qt creates the native handler on its first event cycle.  Without this
-    # short pump, some desktops reject setMouseCallback with a null handler.
-    cv2.waitKey(1)
-    # Mouse coordinates are in the 1280x1160 composed canvas.
-    start_button = {"x1": 165, "y1": 1060, "x2": 615, "y2": 1140}
-    stop_button = {"x1": 665, "y1": 1060, "x2": 1115, "y2": 1140}
+    cv2.resizeWindow(name, 1280, 780)
+    # Mouse coordinates are in the unscaled 1920x550 composed image.
+    button = {"x1": 16, "y1": 492, "x2": 330, "y2": 538}
     def on_mouse(event, x, y, _flags, _param):
-        if event != cv2.EVENT_LBUTTONUP:
-            return
-        _, running, _, _, phase = control.snapshot()
-        if start_button["x1"] <= x <= start_button["x2"] and start_button["y1"] <= y <= start_button["y2"] and not running and phase not in {"starting", "stopping"}:
-            control.request("start")
-        elif stop_button["x1"] <= x <= stop_button["x2"] and stop_button["y1"] <= y <= stop_button["y2"] and running and phase != "stopping":
-            control.request("stop")
+        if event == cv2.EVENT_LBUTTONUP and button["x1"] <= x <= button["x2"] and button["y1"] <= y <= button["y2"]:
+            _, running = control.snapshot()
+            control.request("stop" if running else "start")
     cv2.setMouseCallback(name, on_mouse)
-    last_status_check = 0.0
-    last_packet_at: dict[str, float | None] = {role: None for role in ROLES}
-    display_fps: dict[str, float] = {role: 0.0 for role in ROLES}
-    poller = zmq.Poller()
-    poller.register(socket, zmq.POLLIN)
-    packet = None
-    cached_panels = None
     while True:
-        # Never block the GUI on a camera/network frame.  Mouse events and the
-        # recording controls remain responsive even if preview packets stop.
-        got_packet = socket in dict(poller.poll(timeout=20))
-        if got_packet:
-            packet = json.loads(socket.recv_string())
+        packet = json.loads(socket.recv_string())
         now = time.time()
-        if now - last_status_check >= 2.0:
-            control.request("status")
-            last_status_check = now
-        if packet is None:
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
-                break
-            continue
-        if got_packet:
-            panels = {}
-            for role in ROLES:
-                image = decode(packet["images"][role])
-                age_ms = (now - float(packet["timestamps"][role])) * 1000.0
-                previous = last_packet_at[role]
-                if previous is not None and now > previous:
-                    instant_fps = 1.0 / (now - previous)
-                    display_fps[role] = instant_fps if display_fps[role] == 0.0 else 0.85 * display_fps[role] + 0.15 * instant_fps
-                last_packet_at[role] = now
-                panels[role] = label(image, role, age_ms, int(packet["frame_seq"][role]), display_fps[role])
-            cached_panels = panels
-        else:
-            panels = cached_panels
-        if panels is None:
-            continue
-        # Chest view is deliberately centred on top; the two wrist views are
-        # side-by-side below, matching the operator's left/right arms.
-        canvas = np.zeros((1040, 1280, 3), dtype=np.uint8)
-        canvas[35:515, 320:960] = panels["chest"]
-        canvas[550:1030, 0:640] = panels["left_wrist"]
-        canvas[550:1030, 640:1280] = panels["right_wrist"]
-        canvas = chinese_text(canvas, "OpenArm 双臂遥操｜实时 RGB 预览（不回放，不控制机械臂）", (18, 5), 20, (220, 220, 220))
-        footer = np.zeros((120, canvas.shape[1], 3), dtype=np.uint8)
-        status, running, dataset_root, started, phase = control.snapshot()
-        cv2.rectangle(footer, (start_button["x1"], 12), (start_button["x2"], 92),
-                      (0, 145, 0) if not running and phase not in {"starting", "stopping"} else (70, 70, 70), -1)
-        cv2.rectangle(footer, (stop_button["x1"], 12), (stop_button["x2"], 92),
-                      (0, 0, 210) if running and phase != "stopping" else (70, 70, 70), -1)
-        footer = chinese_text(footer, "开始本地录制", (start_button["x1"] + 115, 31), 27, (255, 255, 255))
-        footer = chinese_text(footer, "停止并保存", (stop_button["x1"] + 135, 31), 27, (255, 255, 255))
-        runtime = f"  已录制 {int(now - started)} 秒" if running and started else ""
-        footer = chinese_text(footer, status + runtime, (22, 96), 17, (0, 255, 255))
-        if dataset_root:
-            footer = chinese_text(footer, f"保存位置：{dataset_root}", (530, 96), 15, (180, 180, 180))
-        cv2.imshow(name, cv2.vconcat([canvas, footer]))
+        panels = []
+        for role in ROLES:
+            image = decode(packet["images"][role])
+            age_ms = (now - float(packet["timestamps"][role])) * 1000.0
+            panels.append(label(image, role, age_ms, int(packet["frame_seq"][role])))
+        frame = cv2.hconcat(panels)
+        footer = np.zeros((70, frame.shape[1], 3), dtype=np.uint8)
+        status, running = control.snapshot()
+        color = (0, 0, 220) if running else (0, 150, 0)
+        cv2.rectangle(footer, (button["x1"], 12), (button["x2"], 58), color, -1)
+        action = "STOP & SAVE LOCAL RECORDING" if running else "START LOCAL RGB-D RECORDING"
+        cv2.putText(footer, action, (28, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(footer, status, (355, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.imshow(name, cv2.vconcat([frame, footer]))
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             break
