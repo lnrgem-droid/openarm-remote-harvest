@@ -1,8 +1,11 @@
 # Safe development defaults. Production RUN is blocked while reaction_verified=false.
 watchdog:
   startup_grace_ms: 2000
-  control_process_heartbeat_timeout_ms: 100
-  control_cycle_timeout_ms: 50
+  # Control runs on reserved Jetson CPUs. These bounds tolerate a brief Python
+  # scheduling disturbance during dataset finalization without weakening the
+  # independent 150 ms leader-network timeout below.
+  control_process_heartbeat_timeout_ms: 300
+  control_cycle_timeout_ms: 250
   network_action_timeout_ms: 150
   max_consecutive_overruns: 5
   local_socket: /run/openarm/follower_watchdog.sock

@@ -102,6 +102,8 @@ public:
     declare_parameter("startup_home_duration_s", 2.0);
     declare_parameter("startup_home_timeout_s", 15.0);
     declare_parameter("startup_home_tolerance_rad", 0.03);
+    declare_parameter("startup_home_target", std::vector<double>{
+      0.0, 0.0, 0.0, 0.6283185307179586, 0.0, 0.0, 0.0});
     declare_parameter("startup_home_kp", std::vector<double>{30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0});
     declare_parameter("startup_home_kd", std::vector<double>{2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4});
     declare_parameter("publish_joint_states", true);
@@ -115,6 +117,7 @@ public:
     declare_parameter("joint_states_topic", std::string("/joint_states"));
     declare_parameter("disable_service", std::string("/openarm_gravity_pd/disable"));
     declare_parameter("pause_service", std::string("/openarm_gravity_pd/pause_command_refresh"));
+    declare_parameter("startup_hold_service", std::string("/openarm_gravity_pd/startup_hold"));
 
     // ── Read parameters ────────────────────────────────────────────────────
     const std::string urdf_path  = get_parameter("urdf_path").as_string();
@@ -141,6 +144,7 @@ public:
     const std::string joint_states_topic = get_parameter("joint_states_topic").as_string();
     const std::string disable_service = get_parameter("disable_service").as_string();
     const std::string pause_service = get_parameter("pause_service").as_string();
+    const std::string startup_hold_service = get_parameter("startup_hold_service").as_string();
 
     if (urdf_path.empty()) {
       RCLCPP_FATAL(get_logger(),
@@ -191,14 +195,16 @@ public:
     params.startup_home_duration_s = startup_home_duration_s;
     params.startup_home_timeout_s = startup_home_timeout_s;
     params.startup_home_tolerance_rad = startup_home_tolerance_rad;
+    params.startup_home_target = get_parameter("startup_home_target").as_double_array();
     params.startup_home_kp = get_parameter("startup_home_kp").as_double_array();
     params.startup_home_kd = get_parameter("startup_home_kd").as_double_array();
 
     if (params.max_joint_vel.size() != 7) {
       throw std::invalid_argument("max_joint_vel must contain 7 values");
     }
-    if (params.startup_home_kp.size() != 7 || params.startup_home_kd.size() != 7) {
-      throw std::invalid_argument("startup_home_kp and startup_home_kd must contain 7 values");
+    if (params.startup_home_kp.size() != 7 || params.startup_home_kd.size() != 7 ||
+        params.startup_home_target.size() != 7) {
+      throw std::invalid_argument("startup home target, kp and kd must contain 7 values");
     }
     if (params.force_feedback_max_torque.size() != 7 || params.force_feedback_scale < 0.0 ||
         params.force_feedback_filter_alpha < 0.0 || params.force_feedback_filter_alpha > 1.0 ||
@@ -226,28 +232,51 @@ public:
     RCLCPP_INFO(get_logger(), "Control rate   : %.0f Hz", control_rate);
     RCLCPP_INFO(get_logger(), "Cmd interp     : %.0f ms", command_interp_s * 1000.0);
     RCLCPP_WARN(get_logger(), "Startup home   : %s",
-      startup_home ? "ENABLED (moves to encoder q=0)" : "disabled (hold measured pose)");
+      startup_home ? "ENABLED (moves to upstream INITIAL_POSITION)" : "disabled (hold measured pose)");
     RCLCPP_INFO(get_logger(), "Joint states   : %s at %.1f Hz",
       publish_joint_states ? "enabled" : "disabled", joint_states_rate);
     RCLCPP_INFO(get_logger(), "ROS routes    : state=%s command=%s disable=%s",
       joint_states_topic.c_str(), right_command_topic.c_str(), disable_service.c_str());
 
     // ── Create arm controllers ─────────────────────────────────────────────
+    // Construct both controllers before either one begins startup homing.  The
+    // two CAN buses are independent, so homing them in parallel prevents the
+    // first arm from sitting unrefreshed while the second arm completes its
+    // interpolation.  That otherwise creates a physical pose mismatch which
+    // makes the remote automatic ALIGN step fail after a reboot.
     if (enable_right) {
       right_arm_ = std::make_unique<ArmController>(
         right_can, urdf_path, "openarm_body_link0", "openarm_right_hand",
         ArmSide::kRight, joint_limits_path, params, get_logger());
-      if (!right_arm_->init()) {
-        throw std::runtime_error("right arm init failed on " + right_can);
-      }
     }
     if (enable_left) {
       left_arm_ = std::make_unique<ArmController>(
         left_can, urdf_path, "openarm_body_link0", "openarm_left_hand",
         ArmSide::kLeft, joint_limits_path, params, get_logger());
-      if (!left_arm_->init()) {
-        throw std::runtime_error("left arm init failed on " + left_can);
-      }
+    }
+
+    bool right_init_ok = true;
+    bool left_init_ok = true;
+    std::thread right_init_thread;
+    std::thread left_init_thread;
+    if (right_arm_) {
+      right_init_thread = std::thread([this, &right_init_ok]() {
+        right_init_ok = right_arm_->init();
+      });
+    }
+    if (left_arm_) {
+      left_init_thread = std::thread([this, &left_init_ok]() {
+        left_init_ok = left_arm_->init();
+      });
+    }
+    if (right_init_thread.joinable()) right_init_thread.join();
+    if (left_init_thread.joinable()) left_init_thread.join();
+
+    if (!right_init_ok) {
+      throw std::runtime_error("right arm init failed on " + right_can);
+    }
+    if (!left_init_ok) {
+      throw std::runtime_error("left arm init failed on " + left_can);
     }
 
     // Teleoperation commands are state targets, not a trajectory queue.
@@ -304,6 +333,16 @@ public:
         response->success = true;
         response->message = request->data ? "MIT command refresh paused; feedback remains active" :
                                             "MIT command refresh resumed";
+      });
+    startup_hold_service_ = create_service<std_srvs::srv::SetBool>(
+      startup_hold_service,
+      [this](const std_srvs::srv::SetBool::Request::SharedPtr request,
+             std_srvs::srv::SetBool::Response::SharedPtr response) {
+        if (right_arm_) right_arm_->setStartupHold(request->data);
+        if (left_arm_) left_arm_->setStartupHold(request->data);
+        response->success = true;
+        response->message = request->data ?
+          "startup pose hold enabled" : "startup pose hold released";
       });
 
     // CAN I/O must not block the ROS executor. Each arm owns one CAN interface,
@@ -434,6 +473,7 @@ private:
   rclcpp::TimerBase::SharedPtr joint_state_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disable_service_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr pause_service_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr startup_hold_service_;
   std::thread right_control_thread_;
   std::thread left_control_thread_;
   std::atomic<bool> control_running_{false};
