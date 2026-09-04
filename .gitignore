@@ -21,13 +21,11 @@ log/
 ros2_robot/build/
 ros2_robot/install/
 ros2_robot/log/
-# Named development overlays keep alternate ROS installs isolated from the
-# baseline install directory and must never be committed.
 ros2_robot/build_*/
 ros2_robot/install_*/
 ros2_robot/log_*/
 
-# Large binary installers (keep out of git)
+# Large binary installers
 *.deb
 *.apk
 
@@ -37,7 +35,10 @@ ros2_robot/log_*/
 /data/
 /recordings/
 /checkpoints/
+/runtime/
 *.log
+artifacts/
+*.jsonl
 
 # Local configuration and credentials
 .env

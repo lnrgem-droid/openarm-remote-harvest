@@ -1200,7 +1200,8 @@ def get_video_info(
 
         video_info["video.height"] = video_stream.height
         video_info["video.width"] = video_stream.width
-        video_info["video.codec"] = video_stream.codec.canonical_name
+        # PyAV 12 exposes Codec.name; canonical_name was removed.
+        video_info["video.codec"] = getattr(video_stream.codec, "canonical_name", video_stream.codec.name)
         video_info["video.pix_fmt"] = video_stream.pix_fmt
 
         # Calculate fps from r_frame_rate

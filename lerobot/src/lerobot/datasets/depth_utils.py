@@ -142,7 +142,13 @@ def quantize_depth(
     quantized = np.rint(norm * DEPTH_QMAX).clip(0, DEPTH_QMAX).astype(np.uint16, copy=False)
 
     if video_backend == "pyav":
-        frame = av.VideoFrame.from_ndarray(quantized, format=pix_fmt)
+        # PyAV 12 cannot construct a gray12le frame directly from a uint16
+        # NumPy array even though FFmpeg/HEVC supports that pixel format.
+        # Construct gray16le first, then let libswscale repack to gray12le.
+        if pix_fmt == "gray12le":
+            frame = av.VideoFrame.from_ndarray(quantized, format="gray16le").reformat(format="gray12le")
+        else:
+            frame = av.VideoFrame.from_ndarray(quantized, format=pix_fmt)
         write_u16_plane(frame.planes[0], quantized)
         return frame
     else:

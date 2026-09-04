@@ -410,8 +410,17 @@ def record(
     listener = None
 
     try:
+        # Some robots (OpenArm RGB-D bridge) provide image observations from a
+        # shared IPC service instead of `robot.cameras`.  Count every 3-D
+        # image feature as a writable stream, otherwise those robots get zero
+        # async writer threads and synchronously save every image in the 30Hz
+        # control loop.
+        image_streams = sum(
+            1 for feature in robot.observation_features.values()
+            if isinstance(feature, tuple) and len(feature) == 3
+        )
         if cfg.resume:
-            num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
+            num_cameras = max(len(robot.cameras) if hasattr(robot, "cameras") else 0, image_streams)
             dataset = LeRobotDataset.resume(
                 cfg.dataset.repo_id,
                 root=cfg.dataset.root,
@@ -444,7 +453,7 @@ def record(
                 features=dataset_features,
                 use_videos=cfg.dataset.video,
                 image_writer_processes=cfg.dataset.num_image_writer_processes,
-                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * image_streams,
                 batch_encoding_size=cfg.dataset.video_encoding_batch_size,
                 rgb_encoder=cfg.dataset.rgb_encoder,
                 depth_encoder=cfg.dataset.depth_encoder,

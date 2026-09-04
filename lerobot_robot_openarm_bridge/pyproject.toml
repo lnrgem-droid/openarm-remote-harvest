@@ -7,7 +7,7 @@ name = "lerobot_robot_openarm_bridge"
 version = "0.1.0"
 description = "ROS2 robot_bridge adapter for LeRobot OpenArm collection and control"
 requires-python = ">=3.12"
-dependencies = ["lerobot", "websockets"]
+dependencies = ["lerobot", "websockets", "pyzmq", "pyyaml"]
 
 [tool.setuptools.packages.find]
 where = ["."]

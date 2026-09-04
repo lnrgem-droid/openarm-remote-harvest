@@ -1,10 +1,12 @@
 # OpenArm 双臂蘑菇采摘项目
 
-这是 OpenArm 双臂蘑菇采摘项目的源码与开发记录仓库。`main` 保留原始单机基线；`dev/remote-teleop-v1` 已冻结当前可实测的**主机（主臂）+ Jetson（从臂）双机双臂遥操作版本**，并作为后续三路 RGB-D 回传开发的固定起点。
+这是 OpenArm 双臂蘑菇采摘项目的源码与开发记录仓库。`main` 保留原始单机基线；`dev/remote-teleop-v1` 是双机双臂遥操作基线；`feat/jetson-rgbd-preview` 实现 Jetson 三路 RGB-D 本地录制和主机实时 RGB 预览。当前 `review/complete-code-20260904` 分支将两部分合并，仅供完整代码审查与后续集成验证。
 
 > 该版本完成了低延迟关节/夹爪遥操、重力补偿、受控归零、从端本地看门狗、相对位姿对齐和有限虚拟双边力反馈。它不是经过生产安全认证的系统；真机必须遵守本文的急停、现场托举和停止流程。
 
-当前双机遥操的完整实现与操作说明见 [双机遥操 v1 基线](docs/REMOTE_TELEOP_V1.md)。相机采集与 RGB 主机预览尚未并入此基线，将在独立功能分支完成。
+> 这不是生产安全认证系统。真机运行时必须遵守急停、现场托举、受控归零和 `hold` 后再 `disable` 的流程。
+
+双机遥操实现见 [双机遥操 v1 基线](docs/REMOTE_TELEOP_V1.md)。本分支新增功能、启动步骤、数据格式和已知边界见 [Jetson RGB-D 与主机实时预览 v1](docs/RGBD_PREVIEW_V1.md)。
 
 ## 项目目标
 
@@ -21,7 +23,7 @@
 | `ros2_robot/` | ROS 2 Humble 工作空间源码，包含 CAN、双臂控制、重力补偿、主从遥操作和 WebSocket bridge |
 | `lerobot/` | LeRobot 0.6.2 源码快照 |
 | `lerobot_robot_openarm_bridge/` | OpenArm 与 LeRobot 之间的可编辑 Python 插件 |
-| `scripts/` | 相机推流和 Orbbec 示例程序 |
+| `scripts/` | 双机启动、Jetson Orbbec RGB-D 唯一相机服务、录制管理器和主机实时预览程序 |
 | `web/` | robot_bridge 的浏览器控制台 |
 | `LeRobot_OpenArm_启动指南.md` | 当前本机的启动与采集操作记录 |
 | `docs/BASELINE.md` | 本次备份范围、环境和回退说明 |
@@ -30,6 +32,8 @@
 | `docs/VALIDATION_2026-08-26.md` | 本次 bundle、编译、假硬件和真机验证记录 |
 | `docs/REMOTE_TELEOP_V1.md` | 当前已冻结的双机双臂遥操版本、网络/CAN 映射、启动与安全流程 |
 | `docs/技术改进历程_双机遥操与RGBD.md` | 从原始单机程序到双机遥操、三路 RGB-D 录制和主机预览的技术路径、踩坑与后续边界 |
+| `docs/RGBD_PREVIEW_V1.md` | 本分支三路 RGB-D 录制、实时预览、数据目录与操作流程 |
+| `docs/OFFICIAL_TRAINING_DATASET.md` | OpenArm 官方训练数据格式、离线转换和 RGB/Depth 边界 |
 
 ## 当前运行基线
 
@@ -40,6 +44,9 @@
 - 当前双机遥操映射：主机主臂右 `can0`、左 `can1`；Jetson 从臂右 `can1`、左 `can2`
 - 当前双机遥操：UDP 动作/状态链路 250 Hz、Jetson 本地控制环 500 Hz、主从 ROS 图隔离（仅 UDP 跨机器）
 - 一键启动：`scripts/run_bimanual_remote_feedback.sh`；启动会受控回到既有编码 `q=0`，经对齐门槛后才请求 `RUNNING`
+- 三路相机：Jetson 唯一相机服务按序列号打开左腕 Gemini 305、右腕 Gemini 305 和胸部 Gemini 335L，均为对齐 RGB-D `640x480@30 FPS`
+- 实时预览：Jetson 以独立 TCP `5556` 发送低优先级 JPEG RGB；主机显示最新帧，不保存、不反压相机服务
+- 本地录制：Jetson 将从臂 observation/action 写为标准 LeRobot 数据集，并把三路 RGB 与对齐深度无损写为带时间索引的 sidecar；录制期间预览自动降至 5 FPS 让路给 NVMe 落盘
 - `openarm_bringup`、`openarm_gravity_pd_control` 和直接占用相同 CAN 的遥操作程序不能同时运行
 - 2026-08-26 已从 Git bundle 全新恢复并完成双臂真机主从遥操作；左右夹爪均被识别并进入控制线程，实际开合尚未单独记录验证
 
@@ -47,7 +54,7 @@
 
 - [ROS 2 工作空间说明](ros2_robot/README.md)
 - [LeRobot × OpenArm 启动指南](LeRobot_OpenArm_启动指南.md)
-- [ZMQ 相机推流说明](scripts/README.md)
+- [Jetson RGB-D 与主机实时预览 v1](docs/RGBD_PREVIEW_V1.md)
 
 旧文档中仍有 `/home/openarm/vla/...`、`~/ros2_arms` 等历史路径。使用本仓库时应替换为实际克隆路径；此次备份不修改这些原始运行文档，以保证基线内容可追溯。
 

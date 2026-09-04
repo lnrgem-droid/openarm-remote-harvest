@@ -14,6 +14,7 @@ from .joint_schema import (
     action_to_values,
     values_to_action,
 )
+from .rgbd_ipc import RGBDHub
 from .ws_client import OpenArmBridgeClient
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class OpenArmBridge(Robot):
         super().__init__(config)
         self.config = config
         self.cameras = make_cameras_from_configs(config.cameras)
+        self.rgbd = (RGBDHub(config.rgbd_endpoint, config.rgbd_roles, config.rgbd_include_depth)
+                     if config.rgbd_endpoint else None)
         self.client = OpenArmBridgeClient(config.ws_url)
         self._last_status_log = 0.0
 
@@ -39,6 +42,11 @@ class OpenArmBridge(Robot):
                 for name, camera in self.cameras.items()
             }
         )
+        if self.rgbd:
+            for role in self.config.rgbd_roles:
+                features[f"{role}_rgb"] = (480, 640, 3)
+                if self.config.rgbd_include_depth:
+                    features[f"{role}_depth"] = (480, 640, 1)
         return features
 
     @cached_property
@@ -47,7 +55,8 @@ class OpenArmBridge(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self.client.is_connected and all(camera.is_connected for camera in self.cameras.values())
+        return (self.client.is_connected and all(camera.is_connected for camera in self.cameras.values())
+                and (self.rgbd is None or self.rgbd.is_connected))
 
     @property
     def is_calibrated(self) -> bool:
@@ -66,6 +75,8 @@ class OpenArmBridge(Robot):
             )
             for camera in self.cameras.values():
                 camera.connect()
+            if self.rgbd:
+                self.rgbd.connect()
             if self.config.control_authority == "policy":
                 self.client.start_control(self.config.policy_command_rate_hz)
         except Exception:
@@ -102,6 +113,11 @@ class OpenArmBridge(Robot):
         observation: RobotObservation = values_to_action(left, right)
         for name, camera in self.cameras.items():
             observation[name] = camera.read_latest()
+        if self.rgbd:
+            for role, frame in self.rgbd.snapshot().items():
+                observation[f"{role}_rgb"] = frame.rgb
+                if self.config.rgbd_include_depth:
+                    observation[f"{role}_depth"] = frame.depth
 
         now = time.monotonic()
         if now - self._last_status_log >= 2.0:
@@ -124,6 +140,8 @@ class OpenArmBridge(Robot):
         for camera in self.cameras.values():
             if camera.is_connected:
                 camera.disconnect()
+        if self.rgbd and self.rgbd.is_connected:
+            self.rgbd.disconnect()
         self.client.close()
 
     @staticmethod
