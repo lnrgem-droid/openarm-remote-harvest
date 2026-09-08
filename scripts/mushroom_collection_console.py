@@ -93,7 +93,17 @@ def choose_collection_session(root: tk.Tk, endpoint: str) -> bool:
 
     dialog = tk.Toplevel(root); dialog.title("选择 Jetson 采集批次")
     dialog.geometry("900x600"); dialog.minsize(760, 520); dialog.configure(bg=BG)
-    dialog.transient(root); dialog.grab_set()
+    # The main window is deliberately withdrawn until a batch is selected.
+    # On X11, making this dialog transient for that withdrawn window causes
+    # some window managers to map it as an invisible 1x1 window.  Keep the
+    # chooser independent, position it explicitly, and raise it once.
+    dialog.update_idletasks()
+    screen_x = max(0, (dialog.winfo_screenwidth() - 900) // 2)
+    screen_y = max(0, (dialog.winfo_screenheight() - 600) // 2)
+    dialog.geometry(f"900x600+{screen_x}+{screen_y}")
+    dialog.deiconify(); dialog.lift(); dialog.attributes("-topmost", True)
+    dialog.after(500, lambda: dialog.attributes("-topmost", False) if dialog.winfo_exists() else None)
+    dialog.grab_set(); dialog.focus_force()
     selected = {"ok": False}
     tk.Label(dialog, text="开始采集前请选择批次", bg=BG, fg=TEXT,
              font=("Noto Sans CJK SC", 18, "bold")).pack(anchor="w", padx=28, pady=(22, 5))
