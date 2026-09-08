@@ -41,10 +41,11 @@ class Recorder:
         self.session_root: Path | None = None
         self.session_id: str | None = None
         self.session_started: float | None = None
-        self.next_episode = 1
+        self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
         self.active_episode: dict | None = None
         self.last_episode: dict | None = None
         self.session_base = Path("/home/nvidia/datasets/openarm_harvest_sessions")
+        self.allowed_storage_root = Path("/home/nvidia/datasets")
         self.camera_status_path = Path("/tmp/openarm-rgbd-camera-status.json")
         self.session_state_path = Path("/home/nvidia/openarm-rgbd-runtime/active-session.json")
         self._restore_session()
@@ -61,13 +62,88 @@ class Recorder:
             root = Path(state["session_root"])
             if not root.is_dir() or not (root / "episodes").is_dir():
                 return
-            self.session_root = root
-            self.session_id = str(state["session_id"])
-            self.session_started = float(state["session_started_unix_s"])
-            existing = list((root / "episodes").glob("episode_*/episode.json"))
-            self.next_episode = len(existing) + 1
+            self._load_session(root)
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return
+
+    def _safe_storage_path(self, value: str | Path, *, create: bool = False) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError("Jetson 保存目录必须使用绝对路径")
+        path = path.resolve(strict=False)
+        allowed = self.allowed_storage_root.resolve()
+        if path != allowed and allowed not in path.parents:
+            raise ValueError(f"保存目录必须位于 {allowed} 内")
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        if not path.is_dir():
+            raise ValueError(f"目录不存在：{path}")
+        if not os.access(path, os.W_OK):
+            raise ValueError(f"目录不可写：{path}")
+        return path
+
+    def _load_session(self, root: Path) -> None:
+        root = self._safe_storage_path(root)
+        manifest_path = root / "session.json"
+        episodes_root = root / "episodes"
+        if not manifest_path.is_file() or not episodes_root.is_dir():
+            raise ValueError("所选目录不是有效的 OpenArm 采集批次")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.session_root = root
+        self.session_id = str(manifest.get("session_id") or root.name)
+        self.session_started = float(manifest.get("session_started_unix_s") or root.stat().st_mtime)
+        self.session_base = root.parent
+        self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
+        for metadata in episodes_root.rglob("episode.json"):
+            try:
+                episode = json.loads(metadata.read_text(encoding="utf-8"))
+                group = str(episode.get("task_group") or self._task_group(str(episode.get("task", ""))))
+                number = int(str(episode.get("episode_id", "")).rsplit("_", 1)[-1])
+                if group in self.next_episode_by_task:
+                    self.next_episode_by_task[group] = max(self.next_episode_by_task[group], number + 1)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        # Reopening an intentionally closed batch is explicit and recoverable.
+        manifest["session_ended_unix_s"] = None
+        self._write_json(manifest_path, manifest)
+        self._persist_session()
+
+    def session_catalog(self) -> dict:
+        sessions = []
+        allowed = self.allowed_storage_root.resolve()
+        for manifest_path in allowed.rglob("session.json"):
+            root = manifest_path.parent
+            try:
+                value = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not (root / "episodes").is_dir():
+                    continue
+                counts = {"left": 0, "right": 0}
+                for metadata in (root / "episodes").rglob("episode.json"):
+                    try:
+                        episode = json.loads(metadata.read_text(encoding="utf-8"))
+                        group = str(episode.get("task_group", ""))
+                        if group in counts:
+                            counts[group] += 1
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                sessions.append({
+                    "session_id": str(value.get("session_id") or root.name),
+                    "session_root": str(root),
+                    "session_started_unix_s": value.get("session_started_unix_s", root.stat().st_mtime),
+                    "closed": value.get("session_ended_unix_s") is not None,
+                    "episode_counts": counts,
+                })
+            except (OSError, json.JSONDecodeError):
+                continue
+        sessions.sort(key=lambda item: float(item["session_started_unix_s"]), reverse=True)
+        return {
+            "ok": True,
+            "allowed_storage_root": str(allowed),
+            "default_storage_base": str(self.session_base),
+            "current_session_root": None if self.session_root is None else str(self.session_root),
+            "sessions": sessions[:100],
+            **self.status(),
+        }
 
     def _persist_session(self) -> None:
         if self.session_root is None:
@@ -75,7 +151,8 @@ class Recorder:
             return
         self._write_json(self.session_state_path, {
             "session_id": self.session_id, "session_root": str(self.session_root),
-            "session_started_unix_s": self.session_started, "next_episode": self.next_episode,
+            "session_started_unix_s": self.session_started,
+            "next_episode_by_task": self.next_episode_by_task,
         })
 
     def status(self) -> dict:
@@ -97,10 +174,48 @@ class Recorder:
                 "session_id": self.session_id,
                 "session_root": None if self.session_root is None else str(self.session_root),
                 "session_started_unix_s": self.session_started,
-                "next_episode": self.next_episode,
+                "next_episode_by_task": dict(self.next_episode_by_task),
                 "active_episode": self.active_episode,
                 "last_episode": self.last_episode,
+                "task_statistics": self._task_statistics(),
                 "camera_health": self._camera_health()}
+
+    def _task_statistics(self) -> dict:
+        """Return persisted result counts, never UI click counts.
+
+        The host may restart at any time.  Scanning sealed episode metadata
+        makes the displayed counters recoverable and ensures only successfully
+        finalized, valid episodes contribute to the large training counter.
+        """
+        values = {"left": {"valid_success": 0, "failure": 0, "aborted": 0},
+                  "right": {"valid_success": 0, "failure": 0, "aborted": 0}}
+        if self.session_root is None:
+            return values
+        for metadata in (self.session_root / "episodes").rglob("episode.json"):
+            try:
+                episode = json.loads(metadata.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            task = str(episode.get("task", ""))
+            side = "left" if task.startswith("LEFT_GRASP_LOG") else "right" if task.startswith("RIGHT_PICK_ONE") else None
+            if side is None:
+                continue
+            result = episode.get("result")
+            if result == "success" and episode.get("valid") is True:
+                values[side]["valid_success"] += 1
+            elif result == "failure":
+                values[side]["failure"] += 1
+            elif result == "aborted":
+                values[side]["aborted"] += 1
+        return values
+
+    @staticmethod
+    def _task_group(task: str) -> str:
+        if task.startswith("LEFT_GRASP_LOG"):
+            return "left"
+        if task.startswith("RIGHT_PICK_ONE"):
+            return "right"
+        return "test"
 
     def _camera_health(self) -> dict:
         try:
@@ -123,7 +238,7 @@ class Recorder:
         if self.session_root is None:
             return
         episodes = []
-        for metadata in sorted((self.session_root / "episodes").glob("*/episode.json")):
+        for metadata in sorted((self.session_root / "episodes").rglob("episode.json")):
             try:
                 episodes.append(json.loads(metadata.read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError):
@@ -134,11 +249,22 @@ class Recorder:
             "session_started_unix_s": self.session_started,
             "session_ended_unix_s": None,
             "storage_contract": "Each episode contains a native LeRobot staging dataset plus raw RGB-D sidecars.",
+            "episode_layout": {
+                "left": "episodes/left/episode_NNNN",
+                "right": "episodes/right/episode_NNNN",
+                "test": "episodes/test/episode_NNNN (not formal training data)",
+            },
             "camera_roles": ["left_wrist", "right_wrist", "chest"],
             "episodes": episodes,
         })
 
-    def _drain_loop(self, process: subprocess.Popen[bytes], master: int, generation: int) -> None:
+    def _drain_loop(
+        self,
+        process: subprocess.Popen[bytes],
+        master: int,
+        generation: int,
+        episode_log_path: Path | None,
+    ) -> None:
         """Continuously drain the PTY so logging can never block recording."""
         while process.poll() is None or select.select([master], [], [], 0)[0]:
             if generation != self._generation:
@@ -154,6 +280,12 @@ class Recorder:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as log:
                 log.write(chunk)
+            # Keep the exact recorder output beside the episode as well.  The
+            # global record-last.log is overwritten by the next recording and
+            # cannot explain an older failed seal during dataset review.
+            if episode_log_path is not None:
+                with episode_log_path.open("a", encoding="utf-8") as log:
+                    log.write(chunk)
 
     def _activate_depth_spool(self, dataset_path: Path, generation: int) -> None:
         """Enable depth only after LeRobot has claimed its empty root."""
@@ -168,6 +300,8 @@ class Recorder:
                 self.active_marker.write_text(str(dataset_path) + "\n", encoding="utf-8")
                 with self._lock:
                     self.phase = "recording"
+                    if self.active_episode is not None:
+                        self.active_episode["recording_started_unix_s"] = time.time()
                 return
             time.sleep(0.05)
 
@@ -179,6 +313,9 @@ class Recorder:
         requested = episode.get("requested_result")
         result = requested if requested in {"success", "failure", "aborted"} else "aborted"
         end_health = self._camera_health()
+        requested_start = float(episode["started_unix_s"])
+        recording_start = float(episode.get("recording_started_unix_s", requested_start))
+        recording_stop = float(episode.get("stop_requested_unix_s", ended))
         spool_written = end_health.get("detail", {}).get("spool_written", {})
         spool_drop = end_health.get("detail", {}).get("spool_drop", {})
         frame_values = [int(spool_written.get(role, 0)) for role in ("left_wrist", "right_wrist", "chest")]
@@ -193,7 +330,9 @@ class Recorder:
                  and all(int(spool_drop.get(role, 0)) == 0 for role in ("left_wrist", "right_wrist", "chest")))
         episode.update({
             "ended_unix_s": ended,
-            "duration_s": round(ended - float(episode["started_unix_s"]), 3),
+            "startup_duration_s": round(max(0.0, recording_start - requested_start), 3),
+            "duration_s": round(max(0.0, recording_stop - recording_start), 3),
+            "finalization_duration_s": round(max(0.0, ended - recording_stop), 3),
             "result": result,
             "valid": valid,
             "recorder_returncode": returncode,
@@ -208,7 +347,8 @@ class Recorder:
         self._write_json(Path(episode["episode_root"]) / "episode.json", episode)
         self.last_episode = dict(episode)
         self.active_episode = None
-        self.next_episode += 1
+        group = str(episode.get("task_group") or self._task_group(str(episode.get("task", ""))))
+        self.next_episode_by_task[group] += 1
         self._write_session_manifest()
         self._persist_session()
 
@@ -225,7 +365,12 @@ class Recorder:
     def _force_stop_after_timeout(self, process: subprocess.Popen[bytes], generation: int) -> None:
         """Escalate only the recorder process group if graceful q is ignored."""
         try:
-            process.wait(timeout=5.0)
+            # A valid LeRobot shutdown may need several seconds to flush
+            # parquet/video metadata and the three lossless RGB-D sidecars.
+            # The UI already acknowledges the click immediately and displays
+            # the STOPPING state, so allow that flush to finish cleanly before
+            # escalating to SIGINT.
+            process.wait(timeout=12.0)
             return
         except subprocess.TimeoutExpired:
             pass
@@ -251,6 +396,8 @@ class Recorder:
             return False
         with self._lock:
             was_starting = self.phase == "starting"
+            if self.active_episode is not None and "stop_requested_unix_s" not in self.active_episode:
+                self.active_episode["stop_requested_unix_s"] = time.time()
         first_request = not self._stop_requested.is_set()
         self._stop_requested.set()
         self.active_marker.unlink(missing_ok=True)
@@ -296,6 +443,10 @@ class Recorder:
                     reason = "camera or RGB-D spool error"
                 self._request_stop(reason or "camera or RGB-D spool error")
                 return
+            camera_health = self._camera_health()
+            if not camera_health.get("ok"):
+                self._request_stop("automatic stop: RGB-D camera health lost")
+                return
             self._stop_requested.wait(1.0)
             if self._stop_requested.is_set():
                 return
@@ -337,7 +488,11 @@ class Recorder:
         self.pty_master, self.started, self.last_log = master, time.time(), "starting"
         process = self.process
         assert process is not None
-        threading.Thread(target=self._drain_loop, args=(process, master, generation),
+        episode_log_path = None
+        if self.active_episode is not None:
+            episode_log_path = Path(self.active_episode["episode_root"]) / "recorder.log"
+            episode_log_path.write_text("", encoding="utf-8")
+        threading.Thread(target=self._drain_loop, args=(process, master, generation, episode_log_path),
                          daemon=True, name="record-log-drain").start()
         # Do not block the UI/start request: package imports can take longer
         # than camera setup.  The helper waits in the background and activates
@@ -351,24 +506,51 @@ class Recorder:
                          daemon=True, name="record-health-monitor").start()
         return {"ok": True, **self.status()}
 
-    def start_session(self) -> dict:
+    def start_session(self, mode: str = "continue", storage_base: str = "", session_root: str = "") -> dict:
         if self.status()["running"]:
             return {"ok": False, "error": "cannot create a session while an episode is running", **self.status()}
-        if self.session_root is not None:
+        if mode == "continue" and self.session_root is not None:
             return {"ok": True, "message": "existing session retained", **self.status()}
+        if mode == "select":
+            if not session_root:
+                return {"ok": False, "error": "选择已有批次时必须提供目录", **self.status()}
+            self._load_session(Path(session_root))
+            return {"ok": True, "message": "selected session loaded", **self.status()}
+        if mode not in {"new", "continue"}:
+            return {"ok": False, "error": "session mode must be continue, new, or select", **self.status()}
+        if mode == "continue" and self.session_root is None:
+            catalog = self.session_catalog()["sessions"]
+            if catalog:
+                self._load_session(Path(catalog[0]["session_root"]))
+                return {"ok": True, "message": "latest session resumed", **self.status()}
+        if storage_base:
+            self.session_base = self._safe_storage_path(storage_base, create=True)
+        else:
+            self.session_base = self._safe_storage_path(self.session_base, create=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         self.session_id = f"mushroom_harvest_{stamp}"
         self.session_root = self.session_base / self.session_id
+        suffix = 1
+        while self.session_root.exists():
+            self.session_root = self.session_base / f"{self.session_id}_{suffix:02d}"
+            suffix += 1
+        self.session_id = self.session_root.name
         self.session_started = time.time()
-        self.next_episode = 1
+        self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
         self.last_episode = None
         self.session_root.mkdir(parents=True, exist_ok=False)
-        (self.session_root / "episodes").mkdir()
+        episodes_root = self.session_root / "episodes"
+        episodes_root.mkdir()
+        for group in ("left", "right", "test"):
+            (episodes_root / group).mkdir()
         self._write_session_manifest()
         self._persist_session()
         return {"ok": True, "message": "session ready; no recording yet", **self.status()}
 
     def start_episode(self, task: str, target: str = "") -> dict:
+        current = self.status()
+        if current["running"] or self.active_episode is not None or self.phase in {"starting", "recording", "stopping"}:
+            return {"ok": False, "error": "another episode is already active or finalizing", **current}
         if self.session_root is None:
             return {"ok": False, "error": "create a session first", **self.status()}
         if not task:
@@ -376,12 +558,22 @@ class Recorder:
         health = self._camera_health()
         if not health.get("ok"):
             return {"ok": False, "error": "three RGB-D cameras are not healthy", **self.status()}
-        episode_id = f"episode_{self.next_episode:04d}"
-        episode_root = self.session_root / "episodes" / episode_id
+        task_group = self._task_group(task)
+        episode_number = self.next_episode_by_task[task_group]
+        episode_root = self.session_root / "episodes" / task_group / f"episode_{episode_number:04d}"
+        # A power loss can leave a directory behind before episode.json was
+        # sealed. Never crash the manager or overwrite it; advance to the next
+        # free number and leave the incomplete directory for offline review.
+        while episode_root.exists():
+            episode_number += 1
+            episode_root = self.session_root / "episodes" / task_group / f"episode_{episode_number:04d}"
+        self.next_episode_by_task[task_group] = episode_number
+        episode_id = f"{task_group}_episode_{episode_number:04d}"
         dataset_root = episode_root / "lerobot"
         episode_root.mkdir(parents=True, exist_ok=False)
         self.active_episode = {
-            "schema_version": 1, "episode_id": episode_id,
+            "schema_version": 2, "episode_id": episode_id,
+            "episode_number": episode_number, "task_group": task_group,
             "episode_root": str(episode_root), "lerobot_root": str(dataset_root),
             "task": task, "target": target, "started_unix_s": time.time(),
             "camera_health_at_start": health, "result": None, "valid": None,
@@ -399,6 +591,10 @@ class Recorder:
             return {"ok": False, "error": "result must be success, failure, or aborted", **self.status()}
         if self.active_episode is None:
             return {"ok": False, "error": "no active episode", **self.status()}
+        if self.phase == "stopping":
+            return {"ok": True, "message": "already stopping; duplicate ignored", **self.status()}
+        if result in {"success", "failure"} and self.phase != "recording":
+            return {"ok": False, "error": "episode is still starting; wait for recording phase", **self.status()}
         self.active_episode["requested_result"] = result
         self.active_episode["failure_code"] = failure_code.strip() or None
         return self.stop()
@@ -426,6 +622,34 @@ class Recorder:
         return {"ok": True, "message": message, **self.status()}
 
 
+def dispatch_request(recorder: Recorder, request: object) -> dict:
+    """Handle one request without allowing client input to kill the service."""
+    if not isinstance(request, dict):
+        return {"ok": False, "error": "request must be a JSON object", **recorder.status()}
+    command = request.get("command")
+    if command == "start":
+        return recorder.start()
+    if command == "stop":
+        return recorder.stop()
+    if command == "session_start":
+        return recorder.start_session(
+            str(request.get("mode", "continue")),
+            str(request.get("storage_base", "")),
+            str(request.get("session_root", "")),
+        )
+    if command == "session_catalog":
+        return recorder.session_catalog()
+    if command == "episode_start":
+        return recorder.start_episode(str(request.get("task", "")), str(request.get("target", "")))
+    if command == "episode_stop":
+        return recorder.stop_episode(str(request.get("result", "aborted")), str(request.get("failure_code", "")))
+    if command == "session_close":
+        return recorder.close_session()
+    if command == "status":
+        return {"ok": True, **recorder.status()}
+    return {"ok": False, "error": "commands: status, session_catalog, session_start, episode_start, episode_stop, session_close", **recorder.status()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     # Private wired robot LAN: host UI can request recording, but this service
@@ -441,23 +665,13 @@ def main() -> None:
     try:
         while True:
             request = socket.recv_json()
-            command = request.get("command")
-            if command == "start":
-                response = recorder.start()
-            elif command == "stop":
-                response = recorder.stop()
-            elif command == "session_start":
-                response = recorder.start_session()
-            elif command == "episode_start":
-                response = recorder.start_episode(str(request.get("task", "")), str(request.get("target", "")))
-            elif command == "episode_stop":
-                response = recorder.stop_episode(str(request.get("result", "aborted")), str(request.get("failure_code", "")))
-            elif command == "session_close":
-                response = recorder.close_session()
-            elif command == "status":
-                response = {"ok": True, **recorder.status()}
-            else:
-                response = {"ok": False, "error": "commands: status, session_start, episode_start, episode_stop, session_close"}
+            try:
+                response = dispatch_request(recorder, request)
+            except Exception as exc:
+                # REP sockets must answer every request.  Previously one stale
+                # directory or malformed request could terminate the manager,
+                # making every visible UI button appear dead until a restart.
+                response = {"ok": False, "error": f"recorder manager error: {type(exc).__name__}: {exc}", **recorder.status()}
             socket.send_json(response)
     finally:
         socket.close(0)

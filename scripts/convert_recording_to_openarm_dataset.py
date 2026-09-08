@@ -109,7 +109,7 @@ def main() -> None:
         raise SystemExit("recording has no robot rows")
     for row in rows:
         if len(row["observation.state"]) != 16 or len(row["action"]) != 16:
-            raise SystemExit("expected 16-D right[8] + left[8] state/action vectors")
+            raise SystemExit("expected 16-D left[8] + right[8] state/action vectors")
 
     indexes = {role: read_camera_index(source, role) for role in ROLES}
     times = {role: [int(item["host_realtime_ns"]) for item in indexes[role]] for role in ROLES}
@@ -139,7 +139,12 @@ def main() -> None:
     timestamps = pd.to_datetime(np.asarray(target_ns, dtype=np.int64), unit="ns")
     for kind, vector_key in (("obs", "observation.state"), ("action", "action")):
         vector = np.asarray([row[vector_key] for row in rows], dtype=np.float32)
-        for side, values in (("right", vector[:, :8]), ("left", vector[:, 8:])):
+        # The OpenArmBridge feature insertion order is LEFT_JOINTS followed by
+        # RIGHT_JOINTS.  The official dataset stores each side in a named
+        # directory, so split the staging vector using that actual contract.
+        # Reversing these slices silently produces a structurally valid but
+        # semantically unusable training dataset.
+        for side, values in (("left", vector[:, :8]), ("right", vector[:, 8:])):
             frame = pd.DataFrame({"timestamp": timestamps, "qpos": list(values)})
             frame.to_parquet(episode / kind / "arms" / side / "state.parquet", index=False)
 
