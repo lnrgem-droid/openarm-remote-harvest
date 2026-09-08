@@ -7,7 +7,7 @@
 GitHub 仓库：`https://github.com/lnrgem-droid/openarm-remote-harvest`
 
 - `dev/remote-teleop-v1`：主机端双机遥操、自动归零/对齐、启动检查与双边反馈；备份提交 `a2a6141`。
-- `feat/jetson-rgbd-preview`：三台 Orbbec RGB-D、Jetson 本地录制、主机预览、采集控制台与官方数据转换；备份提交 `7a22ffa`。
+- `feat/jetson-rgbd-preview`：三台 Orbbec RGB-D、Jetson 本地录制、主机预览、采集控制台与官方数据转换；至少包含 X11 选择窗口修复提交 `3659e68`，以该分支最新提交为准。
 - `backup/jetson-arm64-20260908`：Jetson 当前部署的 ARM64 从端控制源码和真机参数；备份提交 `085db29f`。
 
 ## Jetson 离线恢复包
