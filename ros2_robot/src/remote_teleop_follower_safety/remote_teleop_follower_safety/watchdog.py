@@ -12,8 +12,12 @@ from .state_machine import SafetyStateMachine
 @dataclass(frozen=True)
 class WatchdogConfig:
     startup_grace_ns: int = 2_000_000_000
-    control_heartbeat_timeout_ns: int = 100_000_000
-    control_cycle_timeout_ns: int = 50_000_000
+    # The network action timeout remains the fast 150 ms safety boundary.
+    # Local Python scheduling gets a larger bound because the physical C++ CAN
+    # controller independently keeps its last position target while the Jetson
+    # finalizes an RGB-D episode.
+    control_heartbeat_timeout_ns: int = 300_000_000
+    control_cycle_timeout_ns: int = 250_000_000
     network_action_timeout_ns: int = 150_000_000
     max_consecutive_overruns: int = 5
 

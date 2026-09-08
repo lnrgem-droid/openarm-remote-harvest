@@ -95,6 +95,16 @@ class SafetyStateMachine:
 
     def alignment_complete(self, session_id: int) -> None:
         session_id = self._validate_session(session_id)
+        # The command is delivered over a local datagram request/reply path.
+        # If the READY acknowledgement is delayed, the launcher may retry the
+        # same request.  Treat that retry as an idempotent acknowledgement;
+        # faulting here would turn a successful alignment into a startup abort.
+        if (
+            self._state is ControlState.READY
+            and self._aligned
+            and self._leader_session_id == session_id
+        ):
+            return
         if self._state is not ControlState.ALIGNING:
             raise TransitionError("alignment completion is valid only from ALIGNING")
         if self._leader_session_id != session_id:

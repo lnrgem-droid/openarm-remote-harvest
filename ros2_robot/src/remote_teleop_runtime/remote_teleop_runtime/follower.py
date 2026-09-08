@@ -24,6 +24,20 @@ from .common import (ACTION_PORT, FOLLOWER_DISABLE_SERVICE, FOLLOWER_JOINT_STATE
                      RUNTIME_SOCKET, STATE_PORT, UnixDatagramClient, WATCHDOG_SOCKET,
                      safety_command)
 
+MAX_TRACKING_ERROR_RAD = 0.20
+# A short ROS callback delay is not proof that the physical CAN bus failed.
+# Pause new tracking targets promptly when feedback is stale, but only report a
+# CAN fault after a sustained loss. This avoids latching FAULT during the
+# transient CPU/I/O spike at the start of six-stream RGB-D recording.
+FEEDBACK_CONTROL_TIMEOUT_NS = 150_000_000
+FEEDBACK_CAN_FAULT_TIMEOUT_NS = 1_000_000_000
+
+
+def bounded_tracking_target(actual, requested):
+    """Limit instantaneous following error without limiting total joint travel."""
+    return [max(q - MAX_TRACKING_ERROR_RAD, min(q + MAX_TRACKING_ERROR_RAD, target))
+            for q, target in zip(actual, requested)]
+
 
 class FollowerGateway(Node):
     def __init__(self, enable_left: bool, rate: float):
@@ -48,14 +62,21 @@ class FollowerGateway(Node):
         self.have_right_feedback = False; self.have_left_feedback = not enable_left
         self.last_feedback_ns = 0
         self.latest_action = None; self.last_action_rx_ns = 0; self.peer_ip = None
-        # RUN uses a captured leader/follower pair as its reference. This avoids
-        # an alignment tolerance becoming a sudden absolute-position correction
-        # when remote control is enabled: follower_target = follower_zero +
-        # (leader_now - leader_zero).
+        # Capture both sides at the RUN boundary for diagnostics and a
+        # deterministic transition. During RUNNING the follower uses the
+        # leader's absolute joint positions, matching the original single-host
+        # OpenArm bilateral AdminThread behavior.
         self.run_leader_right = self.run_follower_right = None
         self.run_leader_left = self.run_follower_left = None
         self.run_leader_gripper = self.run_follower_gripper = None
         self.run_leader_left_gripper = self.run_follower_left_gripper = None
+        # A non-RUNNING state is a position hold, not a continuously moving
+        # snapshot of the measured pose.  Latch once and keep publishing it so
+        # gravity or a light disturbance cannot walk a wrist away from the
+        # startup alignment pose while the network handshake is in progress.
+        self.hold_right = self.hold_left = None
+        self.hold_right_gripper = self.hold_left_gripper = None
+        self.command_was_running = False
         self.last_target_right = self.last_target_left = None
         self.safety = {"state": "ALIGNING", "fault_bits": 0, "reason": "waiting for watchdog"}
         self.safety_rx_ns = 0; self.align_since_ns = 0
@@ -116,40 +137,62 @@ class FollowerGateway(Node):
         # `last_control_cycle_ns` describes this gateway's 100 Hz safety cycle,
         # not the asynchronous 100 Hz ROS feedback callback.  Using the latter
         # made ordinary DDS scheduling jitter look like a stalled controller.
-        # Feedback freshness is instead checked explicitly as CAN health with a
-        # 250 ms bound, still well below the time needed to use stale data.
-        feedback_fresh = now_ns - self.last_feedback_ns < 250_000_000
+        # Feedback freshness for issuing new targets is checked separately in
+        # publish_target(). A sustained one-second loss is treated as a CAN
+        # failure; shorter scheduling gaps keep the existing motor target.
+        feedback_fresh = now_ns - self.last_feedback_ns < FEEDBACK_CAN_FAULT_TIMEOUT_NS
         hb = ControllerHeartbeat(self.session, self.hb_sequence, now_ns,
             now_ns, self.last_action_rx_ns,
             self.latest_action.session_id if self.latest_action else 0,
             self.have_feedback and feedback_fresh, False, 0)
         reply = self.watchdog.exchange(encode_heartbeat(hb), 0.004)
         if reply is not None:
+            previous_state = self.safety.get("state")
             self.safety = reply; self.safety_rx_ns = now_ns
+            if previous_state == "RUNNING" and self.safety.get("state") != "RUNNING":
+                self.capture_hold_reference()
+
+    def capture_hold_reference(self):
+        """Latch the measured follower pose used by READY/HOLD/FAULT states."""
+        if not self.have_feedback:
+            return
+        self.hold_right = tuple(self.positions[8:15])
+        self.hold_right_gripper = self.positions[15]
+        if self.enable_left:
+            self.hold_left = tuple(self.positions[0:7])
+            self.hold_left_gripper = self.positions[7]
 
     def publish_target(self, now_ns):
         if not self.have_feedback: return
-        running = self.safety.get("state") == "RUNNING" and now_ns - self.safety_rx_ns < 100_000_000
+        if self.hold_right is None or (self.enable_left and self.hold_left is None):
+            self.capture_hold_reference()
+        feedback_fresh = now_ns - self.last_feedback_ns < FEEDBACK_CONTROL_TIMEOUT_NS
+        running = (
+            self.safety.get("state") == "RUNNING"
+            and now_ns - self.safety_rx_ns < 100_000_000
+            and feedback_fresh
+        )
         fresh = self.latest_action is not None and now_ns - self.last_action_rx_ns <= 100_000_000
-        right_desired = list(self.positions[8:15]); right_gripper_rad = self.positions[15]
-        left_desired = list(self.positions[0:7]); left_gripper_rad = self.positions[7]
+        if self.command_was_running and (not running or not fresh):
+            self.capture_hold_reference()
+        self.command_was_running = running and fresh
+        right_desired = list(self.hold_right); right_gripper_rad = self.hold_right_gripper
+        left_desired = (list(self.hold_left) if self.enable_left else list(self.positions[0:7]))
+        left_gripper_rad = self.hold_left_gripper if self.enable_left else self.positions[7]
         if running and fresh and self.run_leader_right is not None:
             remote = self.latest_action
-            requested = [follower_zero + (leader_now - leader_zero)
-                         for follower_zero, leader_now, leader_zero in zip(
-                             self.run_follower_right, remote.right_arm, self.run_leader_right)]
-            right_desired = [max(q - 0.20, min(q + 0.20, target))
-                             for q, target in zip(right_desired, requested)]
+            requested = list(remote.right_arm)
+            # Bound the target around the *current measured follower pose*.
+            # Bounding around the latched startup hold pose would incorrectly
+            # restrict the arm to a permanent +/-0.20 rad travel window.
+            right_desired = bounded_tracking_target(self.positions[8:15], requested)
             # A gripper command is an opening fraction, not a shared arm pose.
             # Use the leader's absolute opening so a closed leader always
             # closes the follower even if their initial finger openings differ.
             right_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.right_gripper))
             if self.enable_left and self.run_leader_left is not None:
-                requested = [follower_zero + (leader_now - leader_zero)
-                             for follower_zero, leader_now, leader_zero in zip(
-                                 self.run_follower_left, remote.left_arm, self.run_leader_left)]
-                left_desired = [max(q - 0.20, min(q + 0.20, target))
-                                for q, target in zip(left_desired, requested)]
+                requested = list(remote.left_arm)
+                left_desired = bounded_tracking_target(self.positions[0:7], requested)
                 left_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.left_gripper))
             self.applied_session = remote.session_id; self.applied_sequence = remote.sequence
             self.action_timestamp_ns = now_ns
@@ -194,11 +237,22 @@ class FollowerGateway(Node):
                 if cmd == "status": pass
                 elif cmd == "align":
                     if not self.latest_action or not self.have_feedback: raise RuntimeError("missing action or feedback")
-                    errors = [abs(a-b) for a,b in zip(self.latest_action.right_arm, self.positions[8:15])]
+                    differences = [
+                        (f"right J{index}", float(leader), float(follower))
+                        for index, (leader, follower) in enumerate(
+                            zip(self.latest_action.right_arm, self.positions[8:15]), start=1)]
                     if self.enable_left:
-                        errors.extend(abs(a-b) for a,b in zip(self.latest_action.left_arm, self.positions[0:7]))
-                    error = max(errors)
-                    if error > 0.15: raise RuntimeError(f"alignment error {error:.3f} rad > 0.15")
+                        differences.extend(
+                            (f"left J{index}", float(leader), float(follower))
+                            for index, (leader, follower) in enumerate(
+                                zip(self.latest_action.left_arm, self.positions[0:7]), start=1))
+                    joint, leader_value, follower_value = max(
+                        differences, key=lambda item: abs(item[1] - item[2]))
+                    error = abs(leader_value - follower_value)
+                    if error > 0.15:
+                        raise RuntimeError(
+                            f"alignment error {joint}: {error:.3f} rad > 0.15 "
+                            f"(leader={leader_value:.3f}, follower={follower_value:.3f})")
                     if now_ns - self.align_since_ns < 1_000_000_000: raise RuntimeError("alignment must remain <=0.15 rad for 1 second")
                     response = safety_command(self.watchdog, "alignment_complete", leader_session_id=self.latest_action.session_id) or {}
                 elif cmd == "run":
@@ -228,6 +282,7 @@ class FollowerGateway(Node):
         self.run_leader_left = self.run_follower_left = None
         self.run_leader_gripper = self.run_follower_gripper = None
         self.run_leader_left_gripper = self.run_follower_left_gripper = None
+        self.capture_hold_reference()
         self.last_target_right = self.last_target_left = None
 
     def runtime_status(self):
@@ -244,6 +299,11 @@ class FollowerGateway(Node):
             if self.enable_left:
                 response["leader_left_rad"] = list(self.latest_action.left_arm)
             response["action_age_ms"] = (time.monotonic_ns() - self.last_action_rx_ns) / 1_000_000
+        if self.have_feedback:
+            feedback_age_ns = time.monotonic_ns() - self.last_feedback_ns
+            response["feedback_age_ms"] = feedback_age_ns / 1_000_000
+            response["feedback_fresh_for_control"] = (
+                feedback_age_ns < FEEDBACK_CONTROL_TIMEOUT_NS)
         if self.last_target_left is not None:
             errors = [target - actual for target, actual in zip(
                 self.last_target_left, self.positions[0:7])]

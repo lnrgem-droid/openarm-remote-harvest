@@ -63,6 +63,12 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=0.0, help="0 means run until signal")
     parser.add_argument("--startup-grace-s", type=float, default=2.0,
                         help="maximum controller initialization time before a liveness fault")
+    parser.add_argument("--control-heartbeat-timeout-ms", type=float, default=300.0,
+                        help="maximum follower gateway heartbeat gap")
+    parser.add_argument("--control-cycle-timeout-ms", type=float, default=250.0,
+                        help="maximum age of the follower gateway control cycle")
+    parser.add_argument("--network-action-timeout-ms", type=float, default=150.0,
+                        help="maximum leader action age while RUNNING")
     parser.add_argument(
         "--verified-reaction",
         choices=("position_hold",),
@@ -77,6 +83,12 @@ def main() -> None:
     args, _unknown_ros_args = parser.parse_known_args()
     if not args.startup_grace_s > 0.0:
         parser.error("--startup-grace-s must be positive")
+    if not args.control_heartbeat_timeout_ms > 0.0:
+        parser.error("--control-heartbeat-timeout-ms must be positive")
+    if not args.control_cycle_timeout_ms > 0.0:
+        parser.error("--control-cycle-timeout-ms must be positive")
+    if not args.network_action_timeout_ms > 0.0:
+        parser.error("--network-action-timeout-ms must be positive")
 
     reaction = SafetyReaction.UNDECIDED
     verified = False
@@ -87,7 +99,14 @@ def main() -> None:
 
     machine = SafetyStateMachine(reaction, verified)
     supervisor = WatchdogSupervisor(
-        machine, WatchdogConfig(startup_grace_ns=int(args.startup_grace_s * 1_000_000_000)))
+        machine,
+        WatchdogConfig(
+            startup_grace_ns=int(args.startup_grace_s * 1_000_000_000),
+            control_heartbeat_timeout_ns=int(args.control_heartbeat_timeout_ms * 1_000_000),
+            control_cycle_timeout_ns=int(args.control_cycle_timeout_ms * 1_000_000),
+            network_action_timeout_ns=int(args.network_action_timeout_ms * 1_000_000),
+        ),
+    )
     supervisor.boot(time.monotonic_ns())
 
     socket_path = os.path.abspath(args.socket)

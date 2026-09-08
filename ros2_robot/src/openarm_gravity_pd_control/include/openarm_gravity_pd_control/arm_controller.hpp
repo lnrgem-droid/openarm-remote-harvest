@@ -15,6 +15,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -68,12 +69,15 @@ struct ArmControlParams {
   /// Linear blend horizon for each new joint_command [s]. 0 disables lerp.
   /// Match upstream IK period (e.g. 0.02 for 50 Hz) to remove ZOH stair-steps.
   double command_interp_s = 0.02;
-  /// Explicit opt-in startup homing.  This moves the seven arm joints to their
-  /// existing encoder q=0 reference; it never writes motor zero offsets.
+  /// Explicit opt-in startup homing. This reproduces OpenArm's upstream
+  /// AdjustPosition pose; it never writes motor zero offsets.
   bool startup_home = false;
   double startup_home_duration_s = 2.0;
   double startup_home_timeout_s = 15.0;
   double startup_home_tolerance_rad = 0.03;
+  /// Upstream openarm_teleop INITIAL_POSITION: J4 is pi/5, all others zero.
+  std::vector<double> startup_home_target = {0.0, 0.0, 0.0, 0.6283185307179586,
+                                              0.0, 0.0, 0.0};
   /// Used only during startup homing, so a gravity-compensated leader can
   /// return to q=0 without changing its deliberately light normal feel.
   std::vector<double> startup_home_kp = {30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0};
@@ -115,7 +119,8 @@ public:
 
   /**
    * Initialize KDL dynamics and CAN bus motors.  It normally holds the measured
-   * pose; with startup_home enabled it travels to existing encoder q=0 first.
+   * pose; with startup_home enabled it travels to the configured upstream
+   * INITIAL_POSITION first.
    * @return true on success.
    */
   bool init();
@@ -136,6 +141,13 @@ public:
    * Call at control_dt (default 500 Hz) from a timer or dedicated thread.
    */
   void controlStep();
+
+  /**
+   * Keep using the startup pose and startup gains until the distributed
+   * leader/follower safety state has reached RUNNING.  This closes the gap
+   * between local homing completion and remote ALIGN/RUN acknowledgement.
+   */
+  void setStartupHold(bool enabled) { startup_hold_active_.store(enabled); }
 
   /** Refresh feedback without sending MIT commands (supervised safety test only). */
   void feedbackOnlyStep();
@@ -173,6 +185,7 @@ private:
   double gripper_force_feedback_filtered_ = 0.0;
   std::chrono::steady_clock::time_point force_feedback_time_{};
   bool initialized_ = false;
+  std::atomic<bool> startup_hold_active_{false};
 
   static constexpr size_t ARM_DOF = 7;
   static constexpr double GRIPPER_OPEN_M = 0.044;
