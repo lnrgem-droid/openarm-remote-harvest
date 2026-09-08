@@ -40,6 +40,10 @@ remote_control() {
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control $command"
 }
 
+status_is_healthy_running() {
+  /usr/bin/python3 "$ROOT_DIR/scripts/check_remote_running_status.py" <<<"$1"
+}
+
 show_stage() {
   local number="$1" title="$2" motion="$3" control="$4" action="$5"
   printf '\n[%s/6] %s\n' "$number" "$title"
@@ -50,9 +54,18 @@ show_stage() {
 
 release_startup_holds() {
   echo '  正在解除主臂和从臂的启动位保持，准备接受实时遥操指令…'
-  ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /leader/openarm_gravity_pd/startup_hold \
-    std_srvs/srv/SetBool '{data: false}' >/dev/null
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /follower/openarm_gravity_pd/startup_hold std_srvs/srv/SetBool '{data: false}' >/dev/null"
+  local leader_release follower_release
+  leader_release="$(ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /leader/openarm_gravity_pd/startup_hold \
+    std_srvs/srv/SetBool '{data: false}')"
+  grep -Eq 'success=(True|true)' <<<"$leader_release" || {
+    echo "ERROR: 主臂启动位保持未确认解除：$leader_release" >&2
+    return 1
+  }
+  follower_release="$(ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ROS_LOCALHOST_ONLY=1 timeout 8 ros2 service call /follower/openarm_gravity_pd/startup_hold std_srvs/srv/SetBool '{data: false}'")"
+  grep -Eq 'success=(True|true)' <<<"$follower_release" || {
+    echo "ERROR: 从臂启动位保持未确认解除：$follower_release" >&2
+    return 1
+  }
 }
 
 check_jetson_python_runtime() {
@@ -197,6 +210,7 @@ LEADER_PID=$!
 show_stage 5 '等待主臂归位，并检查主从关节差值是否稳定' \
   '可能；主臂可能仍在归位，主从两端随后保持当前位置' \
   '否' '保持所有机械臂不动；本步骤无需按键，程序会自动判断'
+LEADER_READY=false
 for attempt in $(seq 1 50); do
   STATUS="$(remote_control status 2>/dev/null || true)"
   # Same contract on the host: a live leader session alone is not evidence
@@ -204,12 +218,14 @@ for attempt in $(seq 1 50); do
   LEADER_HOME_COUNT="$(grep -c 'Startup homing command complete.' "$LOG_DIR/leader.log" 2>/dev/null || true)"
   if [[ "$LEADER_HOME_COUNT" -ge 2 ]] &&
      grep -q '"leader_session_id": [1-9]' <<<"$STATUS" && grep -q '"state": "ALIGNING"' <<<"$STATUS"; then
+    LEADER_READY=true
     break
   fi
   sleep 1
 done
-if ! grep -q '"leader_session_id": [1-9]' <<<"${STATUS:-}"; then
-  echo "ERROR: follower did not receive a live leader session. See $LOG_DIR/leader.log and Jetson /tmp/openarm_bimanual_follower.log." >&2
+if [[ "$LEADER_READY" != true ]]; then
+  echo "ERROR: 两条主臂未在 50 秒内同时完成归零，或从端未收到有效 leader 会话。" >&2
+  echo "See $LOG_DIR/leader.log and Jetson /tmp/openarm_bimanual_follower.log." >&2
   exit 1
 fi
 
@@ -273,9 +289,18 @@ release_startup_holds
 # holds are released.  Wait for that release to complete and for fresh control
 # traffic before telling the operator that it is safe to move a leader arm.
 sleep 2
-RUN_STATUS="$(remote_control status 2>/dev/null || true)"
-if ! grep -q '"state": "RUNNING"' <<<"$RUN_STATUS"; then
-  echo "ERROR: startup holds were released but RUNNING was lost." >&2
+FOLLOW_READY=false
+for attempt in $(seq 1 20); do
+  RUN_STATUS="$(remote_control status 2>/dev/null || true)"
+  if status_is_healthy_running "$RUN_STATUS"; then
+    FOLLOW_READY=true
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$FOLLOW_READY" != true ]]; then
+  echo "ERROR: 启动位保持解除后，双臂跟随健康条件未全部满足。" >&2
+  echo "要求：RUNNING、fault_bits=0、左右臂均启用、相对跟随参考已捕获。" >&2
   echo "$RUN_STATUS" >&2
   exit 3
 fi

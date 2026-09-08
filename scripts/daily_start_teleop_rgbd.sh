@@ -5,6 +5,13 @@ set -euo pipefail
 
 TELEOP_ROOT="/home/openarm/dev/openarm-remote-harvest"
 RGBD_ROOT="/home/openarm/dev/openarm-rgbd-preview"
+# The existing desktop launcher intentionally keeps its original console as the
+# default.  A second desktop launcher can select an operator-focused console
+# without duplicating (and eventually diverging from) this safety-critical
+# startup sequence.
+COLLECTION_CONSOLE="${OPENARM_COLLECTION_CONSOLE:-$RGBD_ROOT/scripts/rgbd_collection_console.py}"
+COLLECTION_CONSOLE_EXTRA_ARGS="${OPENARM_COLLECTION_CONSOLE_EXTRA_ARGS:-}"
+COLLECTION_PYTHON="${OPENARM_COLLECTION_PYTHON:-/home/openarm/miniconda3/bin/python}"
 JETSON_HOST="${JETSON_HOST:-openarm-jetson}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
 LOG_DIR="/tmp/openarm-daily-start"
@@ -12,6 +19,9 @@ HOST_CAN_SETUP="$TELEOP_ROOT/ros2_robot/install/openarm_can/bin/openarm-can-conf
 JETSON_CAN_SETUP="/home/nvidia/openarm_robot/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
 START_LOCK="/tmp/openarm-daily-teleop.lock"
 TELEOP_CORE="$TELEOP_ROOT/scripts/run_bimanual_remote_feedback.sh"
+TELEOP_SERVICE="openarm-remote-teleop.service"
+TELEOP_SERVICE_SOURCE="$TELEOP_ROOT/scripts/systemd/$TELEOP_SERVICE"
+TELEOP_SERVICE_DEST="$HOME/.config/systemd/user/$TELEOP_SERVICE"
 mkdir -p "$LOG_DIR"
 
 exec 9>"$START_LOCK"
@@ -24,6 +34,22 @@ say() { printf '\n=== %s ===\n' "$*"; }
 
 teleop_status() {
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && ros2 run remote_teleop_runtime remote-teleop-control status" 2>/dev/null || true
+}
+
+status_is_healthy_running() {
+  /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" <<<"$1"
+}
+
+refresh_healthy_running_status() {
+  local attempt
+  for attempt in $(seq 1 5); do
+    status="$(teleop_status)"
+    if status_is_healthy_running "$status"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
 }
 
 ensure_host_can() {
@@ -79,6 +105,27 @@ if test -n "$manager_pid"; then
 elif ! alive "$runtime/record-manager.pid"; then
   echo "启动 Jetson 录制管理服务…"
   nohup bash "$root/scripts/start_jetson_record_manager.sh" >"$runtime/record-manager.log" 2>&1 & echo $! >"$runtime/record-manager.pid"
+fi
+# LeRobot state/action recording requires the read-only follower bridge on
+# Jetson localhost.  Merely renicing an already-running bridge (the old
+# behavior below) leaves every episode unable to start after a Jetson reboot.
+if ! ss -ltn sport = :9000 | grep -q LISTEN; then
+  bridge_pid=$(pgrep -f "^/usr/bin/python3 /opt/ros/humble/bin/ros2 launch robot_bridge|bridge_node.*__node:=robot_bridge" | head -n1 || true)
+  if test -n "$bridge_pid"; then
+    echo "ERROR: robot_bridge 进程存在但 TCP 9000 未监听；为避免影响遥操，不自动杀进程。" >&2
+    exit 1
+  fi
+  echo "启动 Jetson 只读从臂状态/动作桥…"
+  nohup bash "$root/scripts/start_jetson_follower_record_bridge.sh" >"$runtime/record-bridge.log" 2>&1 & echo $! >"$runtime/record-bridge.pid"
+fi
+for n in $(seq 1 30); do
+  ss -ltn sport = :9000 | grep -q LISTEN && break
+  sleep 0.25
+done
+if ! ss -ltn sport = :9000 | grep -q LISTEN; then
+  echo "ERROR: Jetson 只读 robot_bridge 未能监听 127.0.0.1:9000。" >&2
+  tail -40 "$runtime/record-bridge.log" >&2 || true
+  exit 1
 fi
 # Enforce the data-plane CPU partition even when services were started by an
 # older launcher or a manual command. Camera/recording work must never run on
@@ -136,6 +183,17 @@ print("录制状态：未录制（等待界面按钮）")
 PY'
 }
 
+ensure_teleop_service() {
+  [[ -f "$TELEOP_SERVICE_SOURCE" ]] || {
+    echo "ERROR: 遥操服务模板不存在：$TELEOP_SERVICE_SOURCE" >&2
+    exit 1
+  }
+  if ! cmp -s "$TELEOP_SERVICE_SOURCE" "$TELEOP_SERVICE_DEST"; then
+    install -Dm644 "$TELEOP_SERVICE_SOURCE" "$TELEOP_SERVICE_DEST"
+    systemctl --user daemon-reload
+  fi
+}
+
 say "1/5 检查主机 CAN 与网络"
 echo "  机械臂可能运动：否（本步骤只检查主机 CAN、网线、IP 和 SSH）"
 echo "  现在可以遥操：否"
@@ -149,33 +207,59 @@ echo "  现在可以遥操：否"
 echo "  你现在应当：保持从臂周围无人和无障碍物"
 ensure_jetson_can
 ensure_jetson_rgbd_services
-say "3/5 启动受控双臂遥操"
-echo "  机械臂可能运动：是；主从左右臂将依次自动回到初始位"
-echo "  现在可以遥操：否"
-echo "  你现在应当：不要触碰机械臂，无需按键，等待终端显示 RUNNING"
 [[ -f "$TELEOP_CORE" ]] || { echo "ERROR: 遥操核心脚本不存在：$TELEOP_CORE" >&2; exit 1; }
 echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_CORE"
-# The detached teleop process must not inherit descriptor 9. Otherwise it keeps
-# the daily-start lock forever after this UI/recording wrapper exits.
-nohup bash "$TELEOP_CORE" >"$LOG_DIR/teleop.log" 2>&1 9>&- &
-teleop_pid=$!
-progress_count=0
-for n in $(seq 1 60); do
-  status=$(teleop_status)
-  mapfile -t progress_lines < <(grep -E '^\[[0-6]/6\]' "$LOG_DIR/teleop.log" 2>/dev/null || true)
-  while (( progress_count < ${#progress_lines[@]} )); do
-    echo "  遥操启动进度：${progress_lines[$progress_count]}"
-    progress_count=$((progress_count + 1))
+# Run teleoperation as a permanent user service rather than a transient unit.
+# A stopped transient unit remains registered briefly; recreating it under the
+# same name used to fail after a second desktop click, leaving the follower in
+# FAULT.  A regular unit has atomic, repeatable restart semantics.
+ensure_teleop_service
+status="$(teleop_status)"
+if systemctl --user is-active --quiet "$TELEOP_SERVICE" && refresh_healthy_running_status; then
+  say "3/5 复用已经运行的双臂遥操"
+  echo "  机械臂可能运动：是；现有主从跟随保持不变，不重新归零"
+  echo "  现在可以遥操：是"
+  echo "  遥操状态：RUNNING；重复打开采集界面不会中断现有控制。"
+else
+  say "3/5 启动受控双臂遥操"
+  echo "  机械臂可能运动：是；主从左右臂将依次自动回到初始位"
+  echo "  现在可以遥操：否"
+  echo "  你现在应当：不要触碰机械臂，无需按键，等待终端显示 RUNNING"
+  : >"$LOG_DIR/teleop.log"
+  systemctl --user restart "$TELEOP_SERVICE"
+  teleop_pid="$(systemctl --user show "$TELEOP_SERVICE" --property=MainPID --value)"
+  progress_count=0
+  # The core has separate bounded follower-homing, leader-homing and ALIGN
+  # phases.  Its legitimate cold-start budget is longer than 60 seconds; the
+  # old outer timeout could abandon a healthy launch while stage 5/6 was still
+  # progressing.  Keep polling the service, but never declare RUNNING early.
+  for n in $(seq 1 140); do
+    status=$(teleop_status)
+    mapfile -t progress_lines < <(grep -E '^\[[0-6]/6\]' "$LOG_DIR/teleop.log" 2>/dev/null || true)
+    while (( progress_count < ${#progress_lines[@]} )); do
+      echo "  遥操启动进度：${progress_lines[$progress_count]}"
+      progress_count=$((progress_count + 1))
+    done
+    # Never accept a stale RUNNING snapshot from the stack being replaced.
+    # The current service instance must first print its own completion marker,
+    # then the authoritative follower state must satisfy every follow gate.
+    if grep -q '^启动完成：状态 RUNNING' "$LOG_DIR/teleop.log" 2>/dev/null &&
+       status_is_healthy_running "$status"; then
+      break
+    fi
+    if ! systemctl --user is-active --quiet "$TELEOP_SERVICE"; then
+      echo "ERROR: 遥操启动脚本已退出，未进入 RUNNING。最后日志如下：" >&2
+      tail -n 30 "$LOG_DIR/teleop.log" >&2 || true
+      exit 2
+    fi
+    sleep 1
   done
-  if grep -q '"state": "RUNNING"' <<<"$status"; then break; fi
-  if ! kill -0 "$teleop_pid" 2>/dev/null; then
-    echo "ERROR: 遥操启动脚本已退出，未进入 RUNNING。最后日志如下：" >&2
-    tail -n 30 "$LOG_DIR/teleop.log" >&2 || true
-    exit 2
+  if ! grep -q '^启动完成：状态 RUNNING' "$LOG_DIR/teleop.log" 2>/dev/null ||
+     ! status_is_healthy_running "${status:-}"; then
+    echo "ERROR: 本次启动未在 140 秒内完成全部跟随准入条件。查看 $LOG_DIR/teleop.log" >&2
+    exit 1
   fi
-  sleep 1
-done
-grep -q '"state": "RUNNING"' <<<"${status:-}" || { echo "ERROR: 遥操未在 60 秒内进入 RUNNING。查看 $LOG_DIR/teleop.log" >&2; exit 1; }
+fi
 echo "  机械臂可能运动：是；从臂会跟随主臂"
 echo "  现在可以遥操：是"
 echo "  遥操状态：RUNNING，左右臂开始一一对应跟随。"
@@ -195,7 +279,13 @@ echo "选择任务后点击“开始本 episode”；结束时明确选择成功
 echo "停止录制只停止数据保存，不会停止机械臂遥操。"
 echo "若窗口意外关闭，会安全结束当前 episode，但绝不会停止机械臂遥操。"
 echo "相机预览和本地录制独立运行；遥操故障不会再关闭采图窗口。"
+[[ -f "$COLLECTION_CONSOLE" ]] || { echo "ERROR: 采集界面不存在：$COLLECTION_CONSOLE" >&2; exit 1; }
+collection_console_extra_args=()
+if [[ -n "${COLLECTION_CONSOLE_EXTRA_ARGS//[[:space:]]/}" ]]; then
+  read -r -a collection_console_extra_args <<<"$COLLECTION_CONSOLE_EXTRA_ARGS"
+fi
 QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu \
-  /home/openarm/miniconda3/bin/python "$RGBD_ROOT/scripts/rgbd_collection_console.py" \
+  "$COLLECTION_PYTHON" "$COLLECTION_CONSOLE" \
     --jetson "$PEER_IP" --preview-port 5556 --record-port 5557 \
+    "${collection_console_extra_args[@]}" \
     2> >(grep -v -E '^(QFontDatabase: Cannot find font directory|Note that Qt no longer ships fonts)' >&2)

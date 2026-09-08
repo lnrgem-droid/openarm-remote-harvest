@@ -29,6 +29,27 @@ FOLLOWER_LEFT_COMMAND_TOPIC = "/follower/left_arm/joint_command"
 FOLLOWER_DISABLE_SERVICE = "/follower/openarm_gravity_pd/disable"
 
 
+def haptic_desired_axes(leader_reference, follower_reference, applied_action):
+    """Return the follower pose used by the leader haptic spring.
+
+    Arm joints use the relative pose captured when RUN starts so that small
+    alignment offsets do not feel like a permanent load.  Grippers are
+    different: the follower commands their opening absolutely, so their
+    haptic target must also be absolute.  Applying the arm formula to a
+    gripper preserves any startup opening mismatch and makes that leader
+    gripper pull itself open or closed.
+    """
+    if not (len(leader_reference) == len(follower_reference) == len(applied_action) == 16):
+        raise ValueError("bilateral haptic vectors must contain 16 axes")
+
+    desired = [follower_ref + (command - leader_ref) for
+               follower_ref, command, leader_ref in zip(
+                   follower_reference, applied_action, leader_reference)]
+    desired[7] = applied_action[7]
+    desired[15] = applied_action[15]
+    return desired
+
+
 class UnixDatagramClient:
     def __init__(self, server: str):
         self.server = server

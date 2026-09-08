@@ -13,6 +13,7 @@ from sensor_msgs.msg import JointState
 
 from remote_teleop_protocol import ActionCommand, FollowerState, PacketError, decode_message, encode_action
 from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
+                     haptic_desired_axes,
                      LEADER_JOINT_STATES_TOPIC, LEADER_LEFT_COMMAND_TOPIC,
                      LEADER_LEFT_FORCE_FEEDBACK_TOPIC, LEADER_RIGHT_COMMAND_TOPIC,
                      LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, STATE_PORT)
@@ -74,9 +75,7 @@ class LeaderGateway(Node):
             if self.haptic_reference is None:
                 self.haptic_reference = (applied, tuple(state.positions))
             leader_zero, follower_zero = self.haptic_reference
-            desired = [follower_ref + (leader_command - leader_ref) for
-                       follower_ref, leader_command, leader_ref in zip(
-                           follower_zero, applied, leader_zero)]
+            desired = haptic_desired_axes(leader_zero, follower_zero, applied)
             error = [actual - target for actual, target in zip(state.positions, desired)]
             # Nm/rad.  These gains are intentionally much lower than the
             # position-controller gains: this is an impedance cue, not a

@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenArm bimanual remote teleoperation
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/bash /home/openarm/dev/openarm-remote-harvest/scripts/run_bimanual_remote_feedback.sh
+KillMode=control-group
+TimeoutStopSec=15
+StandardOutput=append:/tmp/openarm-daily-start/teleop.log
+StandardError=append:/tmp/openarm-daily-start/teleop.log
+
+[Install]
+WantedBy=default.target

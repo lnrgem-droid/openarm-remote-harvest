@@ -40,6 +40,28 @@ def test_explicit_happy_path():
     assert machine.state is ControlState.RUNNING
 
 
+def test_duplicate_alignment_for_ready_session_is_idempotent():
+    machine = verified_machine()
+    machine.observe_leader_session(10)
+    machine.alignment_complete(10)
+
+    machine.alignment_complete(10)
+
+    snapshot = machine.snapshot()
+    assert snapshot.state is ControlState.READY
+    assert snapshot.aligned
+    assert snapshot.leader_session_id == 10
+
+
+def test_duplicate_alignment_for_different_session_is_rejected():
+    machine = verified_machine()
+    machine.observe_leader_session(10)
+    machine.alignment_complete(10)
+
+    with pytest.raises(TransitionError, match="only from ALIGNING"):
+        machine.alignment_complete(11)
+
+
 def test_hold_requires_another_explicit_run():
     machine = verified_machine()
     machine.observe_leader_session(10)
