@@ -91,20 +91,21 @@ def choose_collection_session(root: tk.Tk, endpoint: str) -> bool:
         messagebox.showerror("已有录制正在运行", "请先完成并封装当前 episode，再重新打开采集界面。")
         return False
 
-    dialog = tk.Toplevel(root); dialog.title("选择 Jetson 采集批次")
+    # Use the real Tk window for the chooser.  A child Toplevel owned by a
+    # withdrawn root is positioned relative to an invisible WM frame on some
+    # GNOME/X11 multi-monitor layouts and can end up entirely off-screen.
+    dialog = root; dialog.title("选择 Jetson 采集批次")
     dialog.geometry("900x600"); dialog.minsize(760, 520); dialog.configure(bg=BG)
-    # The main window is deliberately withdrawn until a batch is selected.
-    # On X11, making this dialog transient for that withdrawn window causes
-    # some window managers to map it as an invisible 1x1 window.  Keep the
-    # chooser independent, position it explicitly, and raise it once.
     dialog.update_idletasks()
-    screen_x = max(0, (dialog.winfo_screenwidth() - 900) // 2)
-    screen_y = max(0, (dialog.winfo_screenheight() - 600) // 2)
+    screen_x = max(20, (dialog.winfo_screenwidth() - 900) // 2)
+    screen_y = max(20, (dialog.winfo_screenheight() - 600) // 2)
     dialog.geometry(f"900x600+{screen_x}+{screen_y}")
-    dialog.deiconify(); dialog.lift(); dialog.attributes("-topmost", True)
+    dialog.deiconify()
+    dialog.lift(); dialog.attributes("-topmost", True)
     dialog.after(500, lambda: dialog.attributes("-topmost", False) if dialog.winfo_exists() else None)
-    dialog.grab_set(); dialog.focus_force()
+    dialog.focus_force()
     selected = {"ok": False}
+    finished = tk.BooleanVar(master=root, value=False)
     tk.Label(dialog, text="开始采集前请选择批次", bg=BG, fg=TEXT,
              font=("Noto Sans CJK SC", 18, "bold")).pack(anchor="w", padx=28, pady=(22, 5))
     current = catalog.get("current_session_root")
@@ -119,7 +120,7 @@ def choose_collection_session(root: tk.Tk, endpoint: str) -> bool:
             messagebox.showerror("操作失败", str(exc), parent=dialog); return
         if not response.get("ok"):
             messagebox.showerror("操作被拒绝", str(response.get("error", "未知错误")), parent=dialog); return
-        selected["ok"] = True; dialog.destroy()
+        selected["ok"] = True; finished.set(True)
 
     tk.Button(dialog, text="继续上次批次（编号接着增加）",
               command=lambda: perform({"mode": "continue"}), bg="#2475a8", fg="white",
@@ -154,8 +155,11 @@ def choose_collection_session(root: tk.Tk, endpoint: str) -> bool:
 
     tk.Button(old_box, text="继续所选已有批次", command=select_existing, bg="#6b5ca5", fg="white",
               font=("Noto Sans CJK SC", 11, "bold"), relief="flat", pady=7).pack(fill="x")
-    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-    root.wait_window(dialog)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: finished.set(True))
+    root.wait_variable(finished)
+    for child in root.winfo_children():
+        child.destroy()
+    root.withdraw()
     return bool(selected["ok"])
 
 
@@ -708,7 +712,15 @@ def main() -> None:
     parser.add_argument("--record-port", type=int, default=5557)
     parser.add_argument("--automated-smoke-test", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    root = tk.Tk(); root.withdraw()
+    root = tk.Tk()
+    # A Toplevel's geometry is relative to its Tk root on X11.  When the root
+    # is withdrawn before it has ever been placed, GNOME may assign it an
+    # off-screen position (especially after a monitor/layout change).  The
+    # chooser then exists and has the correct size, but is translated outside
+    # the visible desktop.  Anchor the hidden owner at the global origin first.
+    root.geometry("1x1+0+0")
+    root.update_idletasks()
+    root.withdraw()
     # GNOME already applies desktop scaling. Conda/system Tk reported ~2.25
     # and scaled point fonts a second time, clipping every footer control.
     root.tk.call("tk", "scaling", 1.0)
