@@ -1,0 +1,124 @@
+{
+  "schema_version": 2,
+  "episode_id": "right_episode_0001",
+  "episode_number": 1,
+  "task_group": "right",
+  "episode_root": "/home/nvidia/datasets/openarm_harvest_sessions/mushroom_harvest_20260909_151046/episodes/right/episode_0001",
+  "lerobot_root": "/home/nvidia/datasets/openarm_harvest_sessions/mushroom_harvest_20260909_151046/episodes/right/episode_0001/lerobot",
+  "task": "RIGHT_PICK_ONE",
+  "target": "",
+  "started_unix_s": 1788937938.4909253,
+  "camera_health_at_start": {
+    "ok": true,
+    "age_s": 1.3,
+    "detail": {
+      "schema_version": 1,
+      "updated_unix_s": 1788937937.154149,
+      "recording_active": false,
+      "cameras": {
+        "left_wrist": {
+          "rgbd_fps": 29.6,
+          "age_ms": 39.0,
+          "pair_us": 10,
+          "drop": 0,
+          "healthy": true,
+          "error": null
+        },
+        "right_wrist": {
+          "rgbd_fps": 29.6,
+          "age_ms": 25.9,
+          "pair_us": 11,
+          "drop": 0,
+          "healthy": true,
+          "error": null
+        },
+        "chest": {
+          "rgbd_fps": 29.6,
+          "age_ms": 48.2,
+          "pair_us": 360,
+          "drop": 0,
+          "healthy": true,
+          "error": null
+        }
+      },
+      "preview_fps": 11.4,
+      "spool_written": {
+        "left_wrist": 538,
+        "right_wrist": 538,
+        "chest": 529
+      },
+      "spool_drop": {
+        "left_wrist": 0,
+        "right_wrist": 0,
+        "chest": 0
+      },
+      "spool_error": null
+    }
+  },
+  "result": "success",
+  "valid": true,
+  "failure_code": null,
+  "recording_started_unix_s": 1788937939.1552536,
+  "requested_result": "success",
+  "stop_requested_unix_s": 1788937956.0638697,
+  "ended_unix_s": 1788937957.0762806,
+  "startup_duration_s": 0.664,
+  "duration_s": 16.909,
+  "finalization_duration_s": 1.012,
+  "recorder_returncode": 0,
+  "stop_reason": "operator requested stop",
+  "camera_health_at_end": {
+    "ok": true,
+    "age_s": 1.9,
+    "detail": {
+      "schema_version": 1,
+      "updated_unix_s": 1788937955.1869094,
+      "recording_active": true,
+      "cameras": {
+        "left_wrist": {
+          "rgbd_fps": 30.0,
+          "age_ms": 13.2,
+          "pair_us": 11,
+          "drop": 0,
+          "healthy": true,
+          "error": null
+        },
+        "right_wrist": {
+          "rgbd_fps": 30.0,
+          "age_ms": 13.1,
+          "pair_us": 10,
+          "drop": 0,
+          "healthy": true,
+          "error": null
+        },
+        "chest": {
+          "rgbd_fps": 30.0,
+          "age_ms": 12.1,
+          "pair_us": 360,
+          "drop": 0,
+          "healthy": true,
+          "error": null
+        }
+      },
+      "preview_fps": 10.0,
+      "spool_written": {
+        "left_wrist": 480,
+        "right_wrist": 479,
+        "chest": 475
+      },
+      "spool_drop": {
+        "left_wrist": 0,
+        "right_wrist": 0,
+        "chest": 0
+      },
+      "spool_error": null
+    }
+  },
+  "rgbd_spool_frame_count": {
+    "left_wrist": 480,
+    "right_wrist": 479,
+    "chest": 475
+  },
+  "rgbd_spool_frame_spread": 5,
+  "collection_eligibility": "eligible"
+}

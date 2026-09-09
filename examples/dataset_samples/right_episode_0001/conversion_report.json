@@ -1,0 +1,28 @@
+{
+  "openarm_dataset": "/home/nvidia/datasets/github_training_samples_20260909/right_episode_0001/openarm_v04",
+  "schema_version": 1,
+  "source_recording": "/home/nvidia/datasets/openarm_harvest_sessions/mushroom_harvest_20260909_151046/episodes/right/episode_0001/lerobot",
+  "depth_storage": "source depth_raw/*.u16le with matching JSONL indexes; unmodified",
+  "rgb_time_anchor": "first_aligned_camera_host_realtime_ns + LeRobot relative timestamp + camera_time_offset_ms",
+  "camera_time_offset_ms": 0.0,
+  "max_camera_skew_ms": 100.0,
+  "frames": 509,
+  "camera_match": {
+    "left_wrist": {
+      "max_skew_ms": 23.727214,
+      "mean_skew_ms": 8.700257770137524,
+      "over_limit": 0
+    },
+    "right_wrist": {
+      "max_skew_ms": 31.530231,
+      "mean_skew_ms": 7.4729226168958744,
+      "over_limit": 0
+    },
+    "chest": {
+      "max_skew_ms": 48.650015,
+      "mean_skew_ms": 7.489026078585462,
+      "over_limit": 0
+    }
+  },
+  "note": "Official OpenArmDataset v0.4 carries RGB cameras only. Depth remains a lossless sidecar."
+}
