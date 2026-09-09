@@ -248,7 +248,10 @@ class Recorder:
             "session_id": self.session_id,
             "session_started_unix_s": self.session_started,
             "session_ended_unix_s": None,
-            "storage_contract": "Each episode contains a native LeRobot staging dataset plus raw RGB-D sidecars.",
+            "storage_contract": (
+                "Each episode contains 30 Hz OpenArm state/action staging plus "
+                "lossless RGB-D sidecars; convert and validate before official training."
+            ),
             "episode_layout": {
                 "left": "episodes/left/episode_NNNN",
                 "right": "episodes/right/episode_NNNN",

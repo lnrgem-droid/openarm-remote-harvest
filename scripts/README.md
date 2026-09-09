@@ -1,5 +1,14 @@
 # ZMQ 相机推流
 
+## Jetson 正式录制后端
+
+默认使用 `record_openarm_fast_staging.py`，以 30 Hz 保存 16 维从臂状态和
+16 维实际遥操作动作，不再为每条 episode 重复加载 Torch/LeRobot。三路对齐
+RGB-D 仍由唯一相机服务无损写入 sidecar。训练前依次运行
+`convert_recording_to_openarm_dataset.py`、官方 `openarm-dataset-validate` 和
+`openarm-dataset-convert`。只有明确需要旧兼容路径时才设置
+`OPENARM_RECORD_BACKEND=legacy_lerobot`。
+
 相机侧运行 `zmq_camera_publisher.py`，通过 ZMQ 推送画面给 LeRobot `ZMQCamera`。
 
 ```bash

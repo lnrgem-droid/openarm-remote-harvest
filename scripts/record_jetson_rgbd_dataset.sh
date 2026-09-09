@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run after the RGB-D service and read-only bridge are healthy.
-# This script records the follower state + applied external action + six RGB-D streams.
+# This script records follower state + applied external action. The independent
+# camera-owner service records the three aligned RGB-D streams into sidecars.
 set -euo pipefail
 
 ROOT_DIR="${OPENARM_RGBD_ROOT:-/home/nvidia/dev/openarm-rgbd-preview}"
@@ -8,6 +9,7 @@ PYTHON_BIN="${LEROBOT_PYTHON:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
 DATASET_ROOT="${DATASET_ROOT:-/home/nvidia/datasets/openarm_rgbd_$(date +%Y%m%d_%H%M%S)}"
 DATASET_ID="${DATASET_ID:-openarm/mushroom-rgbd}"
 TASK="${TASK:-bimanual mushroom harvesting teleoperation}"
+RECORD_BACKEND="${OPENARM_RECORD_BACKEND:-fast_staging}"
 # Jetson's multiprocessing writer can terminate under the existing Conda/
 # CUDA runtime. Threads stay in the healthy parent process and NVMe handles
 # the six independent image writes in parallel.
@@ -44,7 +46,23 @@ if (( available_gb < 20 )); then
   exit 1
 fi
 
-# PyAV 12 gray12le compatibility is handled in our local depth encoder patch.
+# The default lightweight backend records the same 16-D observation/action
+# contract without importing Torch/LeRobot for every episode. RGB-D remains in
+# the lossless camera-owner sidecar and the existing offline converter produces
+# the official OpenArmDataset. Set OPENARM_RECORD_BACKEND=legacy_lerobot only
+# for compatibility investigations.
+if [[ "$RECORD_BACKEND" == "fast_staging" ]]; then
+  exec taskset --cpu-list "$RGBD_RECORD_CPUSET" nice -n "$RGBD_RECORD_NICE" \
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/record_openarm_fast_staging.py" \
+    --root "$DATASET_ROOT" --task "$TASK" --fps 30 \
+    --ws-url ws://127.0.0.1:9000
+fi
+if [[ "$RECORD_BACKEND" != "legacy_lerobot" ]]; then
+  echo "Unknown OPENARM_RECORD_BACKEND: $RECORD_BACKEND" >&2
+  exit 64
+fi
+
+# Legacy backend. PyAV 12 gray12le compatibility is handled in our local depth encoder patch.
 exec taskset --cpu-list "$RGBD_RECORD_CPUSET" nice -n "$RGBD_RECORD_NICE" \
   "$PYTHON_BIN" -m lerobot.scripts.lerobot_record \
   --robot.type=openarm_bridge \
