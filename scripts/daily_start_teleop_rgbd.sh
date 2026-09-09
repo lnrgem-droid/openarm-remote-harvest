@@ -40,11 +40,18 @@ status_is_healthy_running() {
   /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" <<<"$1"
 }
 
+status_is_safe_to_reuse() {
+  # Fresh network traffic alone is insufficient after the arms have been
+  # power-cycled while the long-running controller process stayed alive.
+  /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" \
+    --max-tracking-error-rad 0.05 <<<"$1"
+}
+
 refresh_healthy_running_status() {
   local attempt
   for attempt in $(seq 1 5); do
     status="$(teleop_status)"
-    if status_is_healthy_running "$status"; then
+    if status_is_safe_to_reuse "$status"; then
       return 0
     fi
     sleep 0.2
