@@ -22,7 +22,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 import zmq
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 
 ROLES = ("chest", "left_wrist", "right_wrist")
@@ -407,7 +407,7 @@ class MushroomCollectionApp:
 
     def _build(self) -> None:
         self.root.title("OpenArm 蘑菇采摘 RGB-D 数据采集控制台")
-        self.root.geometry("1500x820"); self.root.minsize(1100, 680); self.root.configure(bg=BG)
+        self.root.geometry("1800x1000"); self.root.minsize(1100, 680); self.root.configure(bg=BG)
         top = tk.Frame(self.root, bg=BG, height=52); top.pack(fill="x", padx=14, pady=(7, 3)); top.pack_propagate(False)
         top.grid_columnconfigure(1, weight=1)
         tk.Label(top, text="OpenArm｜蘑菇采摘 RGB-D 数据采集控制台", bg=BG, fg=TEXT,
@@ -422,6 +422,7 @@ class MushroomCollectionApp:
 
         cameras = tk.Frame(self.root, bg=BG); cameras.pack(fill="both", expand=True, padx=18, pady=4)
         for column in range(3): cameras.grid_columnconfigure(column, weight=1, uniform="camera")
+        cameras.grid_rowconfigure(0, weight=1)
         for column, role in enumerate(ROLES):
             panel = tk.Frame(cameras, bg=PANEL, highlightbackground=BORDER, highlightthickness=2)
             panel.grid(row=0, column=column, sticky="nsew", padx=6)
@@ -587,9 +588,16 @@ class MushroomCollectionApp:
                         (int(w * .40), int(h * .30), int(w * .62), int(h * .66)),
                         outline=(65, 220, 80), width=2,
                     )
-                pil = frame; pil.thumbnail((440, 230), LANCZOS)
+                image_label = getattr(self, role + "_image")
+                # Fill the camera panel dynamically while preserving the
+                # native 4:3 image ratio. This responds to both maximising and
+                # manual window resizing instead of freezing previews at the
+                # former 440x230 thumbnail size.
+                target_w = max(160, image_label.winfo_width() - 12)
+                target_h = max(120, image_label.winfo_height() - 12)
+                pil = ImageOps.contain(frame, (target_w, target_h), method=LANCZOS)
                 photo = ImageTk.PhotoImage(pil); self.photos[role] = photo
-                getattr(self, role + "_image").configure(image=photo, text="")
+                image_label.configure(image=photo, text="")
                 self.camera_metric_vars[role].set(f"{metrics[role + '_fps']:.1f} FPS　{metrics[role + '_age_ms']:.0f} ms")
         preview_age = getattr(self.preview, "age_s", lambda: 0.0)()
         if preview_age > 1.5:
