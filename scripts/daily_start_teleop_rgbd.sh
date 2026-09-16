@@ -117,7 +117,11 @@ fi
 # Jetson localhost.  Merely renicing an already-running bridge (the old
 # behavior below) leaves every episode unable to start after a Jetson reboot.
 if ! ss -ltn sport = :9000 | grep -q LISTEN; then
-  bridge_pid=$(pgrep -f "^/usr/bin/python3 /opt/ros/humble/bin/ros2 launch robot_bridge|bridge_node.*__node:=robot_bridge" | head -n1 || true)
+  # Keep the first character in brackets so pgrep cannot match this very
+  # shell command (its command line contains the search expression).  The
+  # former expression matched itself after every Jetson reboot, then wrongly
+  # reported a stale robot_bridge process and aborted startup.
+  bridge_pid=$(pgrep -f "^/usr/bin/python3 /opt/ros/humble/bin/ros2 launch [r]obot_bridge|[b]ridge_node.*__node:=robot_bridge" | head -n1 || true)
   if test -n "$bridge_pid"; then
     echo "ERROR: robot_bridge 进程存在但 TCP 9000 未监听；为避免影响遥操，不自动杀进程。" >&2
     exit 1
