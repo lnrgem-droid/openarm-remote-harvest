@@ -21,6 +21,7 @@
     publish_joint_states: true
     joint_states_rate: 250.0
     right_command_topic: /leader/right_arm/joint_command
+    collection_return_topic: /leader/right_arm/collection_return
     left_command_topic: /leader/left_arm/joint_command
     right_force_feedback_topic: /leader/right_arm/force_feedback
     left_force_feedback_topic: /leader/left_arm/force_feedback

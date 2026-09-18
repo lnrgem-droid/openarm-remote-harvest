@@ -210,7 +210,9 @@ class FollowerGateway(Node):
             self.action_timestamp_ns = now_ns
         selected = self.collection.update(
             self.positions, left_desired + [left_gripper_rad] + right_desired + [right_gripper_rad],
-            now_ns / 1e9, running and fresh and self.run_leader_right is not None)
+            now_ns / 1e9, running and fresh and self.run_leader_right is not None,
+            self.latest_action.axes if self.latest_action else None,
+            self.latest_action.collection_ack if self.latest_action else 0)
         left_desired, left_gripper_rad = selected[:7], selected[7]
         right_desired, right_gripper_rad = selected[8:15], selected[15]
         self.applied_axes = tuple(selected)
@@ -358,7 +360,8 @@ class FollowerGateway(Node):
         state = FollowerState(self.session, self.sequence, now_ns, self.last_feedback_ns,
             self.action_timestamp_ns, self.applied_session, self.applied_sequence,
             ControlState[state_name], FaultBits(int(self.safety.get("fault_bits", 0))),
-            tuple(self.positions), tuple(self.velocities), tuple(self.efforts), self.collection.flags)
+            tuple(self.positions), tuple(self.velocities), tuple(self.efforts), self.collection.flags,
+            self.collection.leader_target or (0.,)*8)
         self.udp.sendto(encode_state(state), (self.peer_ip, STATE_PORT))
 
     def tick(self):

@@ -30,12 +30,19 @@ class LeaderGateway(Node):
         self.enable_left = enable_left
         self.have_right = False
         self.have_left = False
+        self.right_rx = self.left_rx = 0.0
+        self.collection_ack = 0
+        self.state_session = None
+        self.state_sequence = 0
+        self.state_rx = 0.0
+        self.return_requested = False
         self.lock = threading.Lock()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", STATE_PORT))
         self.sock.setblocking(False)
         self.create_subscription(JointState, LEADER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
         self.right_force_pub = self.create_publisher(JointState, LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, 1)
+        self.return_pub = self.create_publisher(JointState, "/leader/right_arm/collection_return", 1)
         self.left_force_pub = (self.create_publisher(JointState, LEADER_LEFT_FORCE_FEEDBACK_TOPIC, 1)
                                if enable_left else None)
         self.right_position_feedback_pub = self.create_publisher(
@@ -117,22 +124,46 @@ class LeaderGateway(Node):
                 finger = float(values.get("openarm_right_finger_joint1", 0.0))
                 self.axes[15] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
                 self.have_right = True
+                self.right_rx = time.monotonic()
+                self.collection_ack = int(values.get("openarm_right_collection_mode", 2))
             if self.enable_left:
                 left_names = [f"openarm_left_joint{i}" for i in range(1, 8)]
                 if all(name in values for name in left_names):
                     self.axes[0:7] = [float(values[name]) for name in left_names]
                     finger = float(values.get("openarm_left_finger_joint1", 0.0))
                     self.axes[7] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
-                    self.have_left = True
+                self.have_left = True
+                self.left_rx = time.monotonic()
+
+    def publish_return(self, state):
+        # An explicit peer packet is required to release a latched servo. A
+        # missing packet instead leaves the local 100 ms controller watchdog
+        # holding the measured pose; it never resumes a stored trajectory.
+        message = JointState()
+        requested = bool(state.collection_flags & 4)
+        if requested:
+            if state.control_state.name != "RUNNING" or state.fault_bits:
+                return  # local timeout stops any trajectory and latches hold
+            message.position = list(state.leader_return_target)
+            self.return_requested = True
+        elif self.return_requested or self.collection_ack:
+            self.return_requested = False
+        else:
+            return
+        self.return_pub.publish(message)
 
     def tick(self):
         with self.lock:
             if not self.have_right or (self.enable_left and not self.have_left):
                 return
             axes = tuple(self.axes)
+            if (time.monotonic()-self.right_rx > 0.10 or
+                (self.enable_left and time.monotonic()-self.left_rx > 0.10)):
+                return  # don't turn stale physical feedback into fresh actions
         self.sequence += 1
         now_ns = time.monotonic_ns()
-        msg = ActionCommand(self.session, self.sequence, now_ns, axes, 100_000_000)
+        msg = ActionCommand(self.session, self.sequence, now_ns, axes, 100_000_000,
+                            self.collection_ack)
         self.sock.sendto(encode_action(msg), (self.peer, ACTION_PORT))
         self.action_history[self.sequence] = axes
         if len(self.action_history) > 256:
@@ -140,10 +171,25 @@ class LeaderGateway(Node):
         self.sent += 1
         try:
             while True:
-                data, _ = self.sock.recvfrom(2048)
+                data, peer = self.sock.recvfrom(2048)
+                if peer[0] != self.peer:
+                    continue
                 state = decode_message(data)
                 if isinstance(state, FollowerState):
+                    if state.applied_action_session_id != self.session:
+                        continue
+                    if self.state_session is None:
+                        self.state_session = state.session_id
+                    if state.session_id != self.state_session or state.sequence <= self.state_sequence:
+                        continue
+                    # Echo must refer to an action sent in the last 100 ms,
+                    # not just a valid but delayed packet from this session.
+                    if self.sequence-state.applied_action_sequence > max(1, int(.1/self.period)):
+                        continue
+                    self.state_sequence = state.sequence
+                    self.state_rx = time.monotonic()
                     self.received += 1
+                    self.publish_return(state)
                     self.publish_force_feedback(state)
         except BlockingIOError:
             pass

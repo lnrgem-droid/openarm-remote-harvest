@@ -277,6 +277,27 @@ void ArmController::setForceFeedback(const std::vector<double> & torque)
   force_feedback_time_ = std::chrono::steady_clock::now();
 }
 
+void ArmController::setCollectionTarget(const std::vector<double> & target)
+{
+  std::lock_guard<std::mutex> lock(collection_mutex_);
+  if (target.empty()) {
+    collection_active_ = false;
+    collection_fault_ = false;
+    return;
+  }
+  if (startup_hold_active_.load() || target.size() != 8 ||
+      !std::all_of(target.begin(), target.end(), [](double v) {return std::isfinite(v);})) return;
+  for (size_t i = 0; i < ARM_DOF; ++i) {
+    if (target[i] < pos_min_[i] || target[i] > pos_max_[i]) return;
+  }
+  if (target[7] < params_.gripper_max_rad || target[7] > 0.0) return;
+  // Timeout is latched: refreshing the same stream cannot resume motion.
+  if (collection_fault_) return;
+  collection_target_ = target;
+  collection_active_ = true;
+  collection_time_ = std::chrono::steady_clock::now();
+}
+
 // ── Control step ──────────────────────────────────────────────────────────────
 void ArmController::controlStep()
 {
@@ -352,6 +373,39 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   }
 
   const auto now = std::chrono::steady_clock::now();
+  std::vector<double> collection_pose;
+  double collection_grip_target = 0.0;
+  bool collection_servo = false;
+  {
+    std::lock_guard<std::mutex> lock(collection_mutex_);
+    if (collection_active_ && !direct_target) {
+      collection_servo = true;
+      if (!collection_initialized_) {
+        command_positions_ = q_act;
+        collection_gripper_ = gripper_position / GRIPPER_OPEN_M * params_.gripper_max_rad;
+        collection_initialized_ = true;
+      }
+      bool failed = std::chrono::duration<double>(now-collection_time_).count() > 0.1;
+      for (size_t i = 0; i < n; ++i) {
+        failed = failed || std::abs(collection_target_[i]-q_act[i]) > 0.20;
+      }
+      if (failed && !collection_fault_) {
+        collection_fault_ = true;
+        collection_target_ = q_act;
+        collection_target_.push_back(gripper_position / GRIPPER_OPEN_M * params_.gripper_max_rad);
+        collection_gripper_ = collection_target_[7];
+        command_positions_ = q_act;
+        RCLCPP_ERROR(logger_, "Collection return stopped: timeout or tracking error; hold latched");
+      }
+      collection_pose.assign(collection_target_.begin(), collection_target_.begin()+ARM_DOF);
+      collection_grip_target = collection_target_[7];
+      direct_target = &collection_pose;
+      collection_mode_.store(collection_fault_ ? 2 : 1);
+    } else {
+      collection_initialized_ = false;
+      collection_mode_.store(0);
+    }
+  }
   double dt = params_.control_dt;
   if (command_initialized_) {
     dt = std::clamp(
@@ -397,8 +451,13 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
     }
   }
 
+  if (collection_servo) {
+    collection_gripper_ += std::clamp(collection_grip_target-collection_gripper_, -0.25*dt, 0.25*dt);
+    gripper_target = collection_gripper_ / params_.gripper_max_rad;
+  }
+
   for (size_t i = 0; i < n; ++i) {
-    const double max_step = params_.max_joint_vel[i] * dt;
+    const double max_step = (collection_servo ? 0.15 : params_.max_joint_vel[i]) * dt;
     const double error = q_des[i] - command_positions_[i];
     command_positions_[i] += std::clamp(error, -max_step, max_step);
   }
@@ -428,6 +487,7 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       const double bounded = std::clamp(raw, -limit, limit);
       force_feedback_filtered_[i] += alpha * (bounded - force_feedback_filtered_[i]);
       tau_haptic[i] = force_feedback_filtered_[i];
+      if (collection_servo) tau_haptic[i] = 0.0;
     }
   }
 
@@ -473,10 +533,11 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       gripper_force_feedback_filtered_ += alpha * (bounded - gripper_force_feedback_filtered_);
       gripper_haptic = gripper_force_feedback_filtered_;
     }
-    const double gripper_kp = params_.bilateral_position_feedback_enabled ?
-      params_.bilateral_gripper_kp : params_.gripper_kp;
-    const double gripper_kd = params_.bilateral_position_feedback_enabled ?
-      params_.bilateral_gripper_kd : params_.gripper_kd;
+    if (collection_servo) gripper_haptic = 0.0;
+    const double gripper_kp = collection_servo ? 3.0 : (params_.bilateral_position_feedback_enabled ?
+      params_.bilateral_gripper_kp : params_.gripper_kp);
+    const double gripper_kd = collection_servo ? 0.15 : (params_.bilateral_position_feedback_enabled ?
+      params_.bilateral_gripper_kd : params_.gripper_kd);
     openarm_->get_gripper().mit_control_all(
       {{gripper_kp, gripper_kd, gripper_rad, 0.0, gripper_haptic}});
   }

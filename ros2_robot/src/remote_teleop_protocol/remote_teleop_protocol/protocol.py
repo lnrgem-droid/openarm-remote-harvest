@@ -1,4 +1,4 @@
-"""OpenArm remote teleoperation wire protocol v1.
+"""OpenArm remote teleoperation wire protocol v3.
 
 This module deliberately has no ROS, CAN, OpenArm, NumPy, or clock-synchronization
 dependency. It only validates and serializes packets. All integers use network byte
@@ -17,7 +17,7 @@ import zlib
 
 
 MAGIC = b"OARM"
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 JOINTS_PER_ARM = 7
 AXES_PER_SIDE = JOINTS_PER_ARM + 1  # seven arm joints plus one gripper joint
 AXIS_COUNT = AXES_PER_SIDE * 2
@@ -31,7 +31,7 @@ _ACTION = struct.Struct("!16dQ")
 # fault bits, padding,
 # then 16 positions, 16 velocities, and 16 follower interaction-torque estimates.
 _STATE_PREFIX = struct.Struct("!QQQQBI3x")
-_STATE_AXES = struct.Struct("!48d")
+_STATE_AXES = struct.Struct("!56d")
 
 
 class PacketError(ValueError):
@@ -94,6 +94,8 @@ class ActionCommand:
     sender_monotonic_ns: int
     axes: tuple[float, ...]
     valid_for_ns: int
+    # Physical leader controller: 0=free, 1=return servo, 2=latched failure.
+    collection_ack: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -109,6 +111,8 @@ class ActionCommand:
         object.__setattr__(self, "valid_for_ns", _uint64(self.valid_for_ns, "valid_for_ns"))
         if self.valid_for_ns == 0:
             raise PacketError("valid_for_ns must be greater than zero")
+        if self.collection_ack not in (0, 1, 2):
+            raise PacketError("invalid collection acknowledgement")
 
     @property
     def left_arm(self) -> tuple[float, ...]:
@@ -143,9 +147,10 @@ class FollowerState:
     # Estimated contact torque [Nm], with follower gravity and commanded PD
     # torque removed.  Gripper values are currently zero.
     efforts: tuple[float, ...] = (0.0,) * AXIS_COUNT
-    # Header bits: 1=left locally held, 2=right locally held/returning.
-    # These suppress haptics on the detached leader, not motor enablement.
+    # Header bits: 1=left held, 2=right held/returning, 4=leader return servo.
+    # Bit 4 requires bit 2; the other arm's haptics are unaffected.
     collection_flags: int = 0
+    leader_return_target: tuple[float, ...] = (0.0,) * 8
 
     def __post_init__(self) -> None:
         for field in ("session_id", "sequence", "sender_monotonic_ns", "obs_timestamp_ns"):
@@ -169,8 +174,12 @@ class FollowerState:
         object.__setattr__(self, "positions", _axis_tuple(self.positions, "positions"))
         object.__setattr__(self, "velocities", _axis_tuple(self.velocities, "velocities"))
         object.__setattr__(self, "efforts", _axis_tuple(self.efforts, "efforts"))
-        if self.collection_flags not in (0, 1, 2, 3):
+        if self.collection_flags not in (0, 1, 2, 3, 6, 7):
             raise PacketError("invalid collection flags")
+        target = tuple(float(v) for v in self.leader_return_target)
+        if len(target) != 8 or not all(math.isfinite(v) for v in target):
+            raise PacketError("invalid leader return target")
+        object.__setattr__(self, "leader_return_target", target)
 
 
 Message = Union[ActionCommand, FollowerState]
@@ -214,6 +223,7 @@ def encode_action(command: ActionCommand) -> bytes:
         command.sequence,
         command.sender_monotonic_ns,
         payload,
+        command.collection_ack,
     )
 
 
@@ -226,7 +236,8 @@ def encode_state(state: FollowerState) -> bytes:
         int(state.control_state),
         int(state.fault_bits),
     )
-    payload = prefix + _STATE_AXES.pack(*state.positions, *state.velocities, *state.efforts)
+    payload = prefix + _STATE_AXES.pack(*state.positions, *state.velocities, *state.efforts,
+                                      *state.leader_return_target)
     return _encode(
         MessageType.FOLLOWER_STATE,
         state.session_id,
@@ -250,7 +261,7 @@ def decode_message(datagram: bytes) -> Message:
         raise PacketError("bad protocol magic")
     if version != PROTOCOL_VERSION:
         raise PacketError(f"unsupported protocol version {version}")
-    if flags & ~3 or (raw_type != int(MessageType.FOLLOWER_STATE) and flags):
+    if (raw_type == int(MessageType.ACTION) and flags not in (0, 1, 2)) or flags & ~7:
         raise PacketError("invalid message flags")
     if len(datagram) != _HEADER.size + length:
         raise PacketError("payload length does not match datagram length")
@@ -272,7 +283,7 @@ def decode_message(datagram: bytes) -> Message:
         if len(payload) != _ACTION.size:
             raise PacketError("invalid ACTION payload size")
         values = _ACTION.unpack(payload)
-        return ActionCommand(session_id, sequence, sender_ns, values[:16], values[16])
+        return ActionCommand(session_id, sequence, sender_ns, values[:16], values[16], flags)
 
     if len(payload) != _STATE_PREFIX.size + _STATE_AXES.size:
         raise PacketError("invalid FOLLOWER_STATE payload size")
@@ -296,8 +307,9 @@ def decode_message(datagram: bytes) -> Message:
         fault_bits=FaultBits(raw_faults),
         positions=axes[:AXIS_COUNT],
         velocities=axes[AXIS_COUNT:2 * AXIS_COUNT],
-        efforts=axes[2 * AXIS_COUNT:],
+        efforts=axes[2 * AXIS_COUNT:3 * AXIS_COUNT],
         collection_flags=flags,
+        leader_return_target=axes[3 * AXIS_COUNT:],
     )
 
 

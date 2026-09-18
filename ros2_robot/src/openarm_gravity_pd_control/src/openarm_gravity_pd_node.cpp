@@ -118,6 +118,7 @@ public:
     declare_parameter("disable_service", std::string("/openarm_gravity_pd/disable"));
     declare_parameter("pause_service", std::string("/openarm_gravity_pd/pause_command_refresh"));
     declare_parameter("startup_hold_service", std::string("/openarm_gravity_pd/startup_hold"));
+    declare_parameter("collection_return_topic", std::string(""));
 
     // ── Read parameters ────────────────────────────────────────────────────
     const std::string urdf_path  = get_parameter("urdf_path").as_string();
@@ -282,6 +283,14 @@ public:
     // Teleoperation commands are state targets, not a trajectory queue.
     // Retaining only the newest sample prevents replaying stale commands.
     const auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
+    const auto collection_topic = get_parameter("collection_return_topic").as_string();
+    if (!collection_topic.empty()) {
+      collection_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+        collection_topic, command_qos,
+        [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+          if (right_arm_) right_arm_->setCollectionTarget(msg->position);
+        });
+    }
 
     right_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       right_command_topic, command_qos,
@@ -458,11 +467,18 @@ private:
     }
     if (has_right) {
       appendArmState(msg, RIGHT_JOINT_NAMES, "openarm_right_finger_joint1", right_state);
+      if (collection_sub_) {
+        msg.name.push_back("openarm_right_collection_mode");
+        msg.position.push_back(right_arm_->collectionMode());
+        msg.velocity.push_back(0.0);
+        msg.effort.push_back(0.0);
+      }
     }
     joint_state_pub_->publish(msg);
   }
 
   std::unique_ptr<ArmController> right_arm_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr collection_sub_;
   std::unique_ptr<ArmController> left_arm_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;

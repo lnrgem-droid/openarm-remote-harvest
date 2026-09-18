@@ -135,6 +135,9 @@ public:
   /// Set follower contact-torque estimates received on the leader only.
   /// The values must already be expressed in this controller's joint order.
   void setForceFeedback(const std::vector<double> & torque);
+  /// Dedicated leader-only bounded return stream. Empty target releases servo.
+  void setCollectionTarget(const std::vector<double> & target);
+  int collectionMode() const { return collection_mode_.load(); }
 
   /**
    * Execute one gravity+PD control step.
@@ -186,6 +189,14 @@ private:
   std::chrono::steady_clock::time_point force_feedback_time_{};
   bool initialized_ = false;
   std::atomic<bool> startup_hold_active_{false};
+  std::mutex collection_mutex_;
+  std::vector<double> collection_target_;
+  std::chrono::steady_clock::time_point collection_time_{};
+  bool collection_active_ = false;
+  bool collection_fault_ = false;
+  bool collection_initialized_ = false;
+  double collection_gripper_ = 0.0;
+  std::atomic<int> collection_mode_{0};
 
   static constexpr size_t ARM_DOF = 7;
   static constexpr double GRIPPER_OPEN_M = 0.044;

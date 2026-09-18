@@ -37,19 +37,21 @@ def test_saved_pose_survives_restart_and_return_is_bounded(tmp_path):
     m = CollectionMotion(path); execute(m, "right_save")
     m = CollectionMotion(path); execute(m, "left_lock")
     displaced = list(Q); displaced[14] = .1
-    execute(m, "right_return", actual=displaced, applied=displaced)
+    execute(m, "right_return", actual=displaced, applied=displaced, leader=displaced)
     prev = list(displaced); max_speed = 0.
+    master = list(displaced)
     for step in range(1, 401):
-        out = m.update(prev, displaced, 1.+step*.01, True)
+        out = m.update(prev, master, 1.+step*.01, True, master,
+                       1 if m.leader_target is not None else 0)
         max_speed = max(max_speed, abs(out[14]-prev[14])/.01)
+        if m.leader_target is not None:
+            master[8:16] = m.leader_target
         prev = out
     assert max_speed <= .15
-    assert m.right is not None and not m.returning
-    assert list(m.right) == Q[8:16]
-    assert m.flags == 3
-    with pytest.raises(ValueError, match="对齐"):
-        execute(m, "right_follow", leader=displaced)
-    execute(m, "right_follow")
+    assert m.right is None and not m.returning
+    assert prev[8:16] == Q[8:16]
+    assert master[8:16] == Q[8:16]
+    assert m.flags == 1
 
 
 def test_no_recording_during_return_or_mutation_during_recording(tmp_path):
@@ -94,9 +96,74 @@ def test_corrupted_or_out_of_bounds_pose_rejected(tmp_path):
 def test_tracking_error_aborts_motion(tmp_path):
     m = CollectionMotion(tmp_path / "pose.json")
     execute(m, "right_save"); execute(m, "left_lock"); execute(m, "right_return")
+    m.update(Q, Q, 1.01, True, Q, 0)
     wrong = list(Q); wrong[10] += .3
-    m.update(wrong, Q, 1.2, True)
+    m.update(wrong, Q, 1.2, True, Q, 1)
     assert not m.returning and "超限" in m.note
+
+
+def test_no_follower_motion_until_physical_leader_ack(tmp_path):
+    m = CollectionMotion(tmp_path / "pose.json")
+    execute(m, "right_save"); execute(m, "left_lock")
+    moved = list(Q); moved[14] += .1
+    execute(m, "right_return", actual=moved, applied=moved, leader=moved)
+    assert m.update(moved, Q, 2., True, moved, 0)[8:] == moved[8:]
+    m.update(moved, Q, 4.1, True, moved, 0)
+    assert not m.returning and m.phase == "hold"
+
+
+def test_master_tracking_error_and_fault_abort_both(tmp_path):
+    m = CollectionMotion(tmp_path / "pose.json")
+    execute(m, "right_save"); execute(m, "left_lock"); execute(m, "right_return")
+    m.update(Q, Q, 1.01, True, Q, 0)
+    wrong = list(Q); wrong[14] += .3
+    m.update(Q, wrong, 1.1, True, wrong, 1)
+    assert not m.returning and m.leader_target[6] == .3
+    execute(m, "right_return")
+    m.update(Q, Q, 1.02, True, Q, 0)
+    m.update(Q, Q, 2., True, Q, 2)
+    assert not m.returning and "控制器故障" in m.note
+
+
+def test_record_waits_for_leader_release_ack(tmp_path):
+    m = CollectionMotion(tmp_path / "pose.json")
+    execute(m, "right_save"); execute(m, "left_lock"); execute(m, "right_return")
+    m.update(Q, Q, .99, True, Q, 0)
+    for now in (1., 3., 3.6):
+        m.update(Q, Q, now, True, Q, 1)
+    assert m.phase == "releasing" and m.returning
+    with pytest.raises(ValueError, match="运动切换"):
+        execute(m, "collection_begin", side="right", token="test")
+    m.update(Q, Q, 3.7, True, Q, 0)
+    execute(m, "collection_begin", side="right", token="test")
+
+
+def test_fault_can_only_retry_after_explicit_release_handshake(tmp_path):
+    m = CollectionMotion(tmp_path / "pose.json")
+    execute(m, "right_save"); execute(m, "left_lock"); execute(m, "right_return")
+    m.update(Q, Q, 1.1, True, Q, 2)
+    assert m.phase == "resetting" and m.leader_target is None
+    m.update(Q, Q, 1.2, True, Q, 0)
+    assert m.phase == "preparing" and m.leader_target is not None
+    m.update(Q, Q, 1.3, True, Q, 1)
+    assert m.phase == "moving"
+    execute(m, "right_pause")
+    wrong = list(Q); wrong[14] += .1
+    execute(m, "right_follow", leader=wrong)
+    m.update(Q, wrong, 1.4, True, wrong, 0)
+    assert m.right is not None and m.leader_target is None and not m.returning
+
+
+def test_old_pose_requires_resave_and_packet_carries_targets(tmp_path):
+    path = tmp_path / "old.json"; path.write_text('{"schema_version": 1}')
+    assert CollectionMotion(path).saved is None
+    from remote_teleop_protocol import ActionCommand, FollowerState, ControlState, FaultBits, encode_action, encode_state, decode_message
+    state = FollowerState(1, 1, 1, 1, 1, 1, 1, ControlState.RUNNING,
+                          FaultBits(0), tuple(Q), (0.,)*16, (0.,)*16, 7, tuple(Q[8:]))
+    assert decode_message(encode_state(state)) == state
+    for ack in (0, 1, 2):
+        command = ActionCommand(1, 1, 1, tuple(Q), 100000000, ack)
+        assert decode_message(encode_action(command)) == command
 
 
 def test_flags_roundtrip_and_detached_leader_receives_zero_haptics():

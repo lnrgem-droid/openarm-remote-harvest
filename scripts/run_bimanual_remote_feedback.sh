@@ -69,7 +69,7 @@ release_startup_holds() {
 }
 
 check_jetson_python_runtime() {
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_runtime.follower import FollowerGateway; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, \"collection_flags\")'"
+  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_runtime.follower import FollowerGateway; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, \"leader_return_target\")'"
 }
 
 repair_jetson_python_runtime() {
@@ -91,10 +91,14 @@ repair_jetson_python_runtime() {
 }
 
 verify_runtime_builds() {
-  /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, "collection_flags")' || {
+  /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, "leader_return_target")' || {
     echo 'ERROR: 主机遥操 Python 包未更新，请重新构建 remote_teleop_protocol 和 remote_teleop_runtime。' >&2
     return 1
   }
+  if ! strings "$HOST_CONTROL_NODE" | grep -F 'collection_return_topic' >/dev/null; then
+    echo 'ERROR: 主机控制器缺少右主臂回位功能，请先编译 openarm_gravity_pd_control。' >&2
+    return 1
+  fi
   if [[ ! -x "$HOST_CONTROL_NODE" ]] || ! strings "$HOST_CONTROL_NODE" | grep -F "$HOME_MARKER" >/dev/null; then
     echo "ERROR: 主机 install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先重新编译。" >&2
     return 1
