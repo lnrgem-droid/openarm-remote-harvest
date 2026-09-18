@@ -80,13 +80,20 @@ class FakePreview:
 class FakeTeleop:
     def __init__(self, *_args) -> None:
         self.stop = threading.Event()
-        self.value = {"state": "RUNNING", "fault_bits": 0, "last_running_age_s": 0.0}
+        self.value = {"state": "RUNNING", "fault_bits": 0, "last_running_age_s": 0.0,
+                      "collection": {"left_mode": "FOLLOW", "right_mode": "FOLLOW"}}
+        self.pending = False
+        self.calls = []
 
     def start(self) -> None:
         pass
 
     def snapshot(self):
         return dict(self.value)
+
+    def request(self, command):
+        self.calls.append(command)
+        return True
 
 
 class Args:
@@ -98,6 +105,26 @@ class Args:
 
 
 class ConsoleSimulationTest(unittest.TestCase):
+    def test_motion_buttons_and_recording_gate(self):
+        self.app.motion_buttons["left_lock"].invoke()
+        self.assertEqual(self.app.teleop.calls, ["left_lock"])
+        self.app.control.value.update(running=True, phase="recording")
+        self.app.on_motion("right_return")
+        self.assertEqual(self.app.teleop.calls, ["left_lock"])
+        self.app.control.value.update(running=False, phase="idle")
+        self.app.right_ready.set(True); self.app.target_confirmed.set(True)
+        self.app.on_start("right")
+        self.assertNotEqual(self.app.control.calls[-1][0], "episode_start")
+        self.app.teleop.value["collection"].update(left_mode="HOLD", saved={}, right_ready_error_rad=.02)
+        self.app.on_start("right")
+        self.assertEqual(self.app.control.calls[-1][0], "episode_start")
+
+    def test_window_close_requests_return_pause_before_closing(self):
+        self.app.teleop.value["collection"]["right_mode"] = "RETURNING"
+        self.app.on_window_close()
+        self.assertEqual(self.app.teleop.calls, ["right_pause"])
+        self.assertTrue(self.root.winfo_exists())
+
     def setUp(self) -> None:
         ui.SessionControl = FakeControl
         ui.PreviewReceiver = FakePreview

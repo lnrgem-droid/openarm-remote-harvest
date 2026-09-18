@@ -13,6 +13,9 @@ import pty
 import select
 import shutil
 import signal
+import socket
+import tempfile
+import uuid
 import subprocess
 import threading
 import time
@@ -37,6 +40,7 @@ class Recorder:
         self._generation = 0
         self._stop_requested = threading.Event()
         self._lock = threading.RLock()
+        self.motion_token = None
         self.min_free_gb = 10.0
         self.session_root: Path | None = None
         self.session_id: str | None = None
@@ -354,6 +358,26 @@ class Recorder:
         self.next_episode_by_task[group] += 1
         self._write_session_manifest()
         self._persist_session()
+        self._release_motion_lock()
+
+    def _motion_request(self, command, **fields):
+        # Independent of ROS/Python environments; the gateway owns all motion.
+        with tempfile.TemporaryDirectory(prefix="collection_ctl_") as directory:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+                client.bind(str(Path(directory) / "client.sock")); client.settimeout(2.0)
+                client.sendto(json.dumps({"command": command, **fields}).encode(), "/tmp/openarm_remote_runtime.sock")
+                result = json.loads(client.recv(32768))
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        return result
+
+    def _release_motion_lock(self):
+        if self.motion_token:
+            try:
+                self._motion_request("collection_end", token=self.motion_token)
+                self.motion_token = None
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.last_log += f"\n录制锁释放未确认，下一次录制前重试：{exc}"
 
     def _clear_marker_when_recording_exits(self, process: subprocess.Popen[bytes], generation: int) -> None:
         """Never leave a camera spool attached to a completed episode."""
@@ -450,6 +474,16 @@ class Recorder:
             if not camera_health.get("ok"):
                 self._request_stop("automatic stop: RGB-D camera health lost")
                 return
+            if self.motion_token:
+                try:
+                    motion = self._motion_request("status")
+                    lease = motion.get("collection", {}).get("recording") or {}
+                    if motion.get("state") != "RUNNING" or motion.get("fault_bits") or lease.get("token") != self.motion_token:
+                        self._request_stop("automatic stop: collection motion control lost")
+                        return
+                except (OSError, ValueError, RuntimeError):
+                    self._request_stop("automatic stop: collection motion status unavailable")
+                    return
             self._stop_requested.wait(1.0)
             if self._stop_requested.is_set():
                 return
@@ -562,6 +596,21 @@ class Recorder:
         if not health.get("ok"):
             return {"ok": False, "error": "three RGB-D cameras are not healthy", **self.status()}
         task_group = self._task_group(task)
+        motion = None
+        if task_group in {"left", "right"}:
+            self._release_motion_lock()
+            token = uuid.uuid4().hex
+            try:
+                motion = self._motion_request("collection_begin", side=task_group, token=token)
+                self.motion_token = token
+            except (OSError, ValueError, RuntimeError) as exc:
+                # An acknowledgement can be lost after the lock was acquired.
+                # Release only this request token; never somebody else's lock.
+                try:
+                    self._motion_request("collection_end", token=token)
+                except (OSError, ValueError, RuntimeError):
+                    pass
+                return {"ok": False, "error": f"采集姿态未准备好：{exc}", **self.status()}
         episode_number = self.next_episode_by_task[task_group]
         episode_root = self.session_root / "episodes" / task_group / f"episode_{episode_number:04d}"
         # A power loss can leave a directory behind before episode.json was
@@ -581,9 +630,15 @@ class Recorder:
             "task": task, "target": target, "started_unix_s": time.time(),
             "camera_health_at_start": health, "result": None, "valid": None,
             "failure_code": None,
+            "collection_motion_at_start": motion.get("collection") if motion else None,
         }
-        response = self.start(dataset_root=str(dataset_root), task=task)
+        try:
+            response = self.start(dataset_root=str(dataset_root), task=task)
+        except Exception:
+            self._release_motion_lock()
+            raise
         if not response.get("ok"):
+            self._release_motion_lock()
             self.active_episode = None
             try: episode_root.rmdir()
             except OSError: pass

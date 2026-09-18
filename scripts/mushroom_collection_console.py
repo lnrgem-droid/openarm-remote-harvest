@@ -2,7 +2,8 @@
 """Reliable task-specific OpenArm mushroom RGB-D collection console.
 
 The UI is a client of Jetson's recorder manager. It never opens cameras,
-accesses CAN, or changes teleoperation. Native Tk buttons are used instead of
+accesses CAN. Explicit posture buttons use the follower control socket via SSH.
+Native Tk buttons are used instead of
 image-coordinate hit testing, so display scaling cannot make visible controls
 unclickable.
 """
@@ -340,6 +341,9 @@ class TeleopMonitor:
         self._lock = threading.Lock()
         self._value: dict[str, Any] = {"state": "CHECKING", "fault_bits": None, "connected": False}
         self._last_running = 0.0
+        self.requests = queue.Queue(maxsize=1)
+        self.results = queue.Queue()
+        self.pending = False
         self.thread = threading.Thread(target=self._run, daemon=True, name="teleop-status-monitor")
 
     def start(self) -> None:
@@ -350,26 +354,49 @@ class TeleopMonitor:
             "source /opt/ros/humble/setup.bash && "
             "source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && "
             "source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && "
-            "ros2 run remote_teleop_runtime remote-teleop-control status"
+            "ros2 run remote_teleop_runtime remote-teleop-control "
         )
         while not self.stop.is_set():
             try:
+                command = self.requests.get_nowait()
+            except queue.Empty:
+                command = "status"
+            try:
                 result = subprocess.run(
-                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", self.ssh_host, remote],
+                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", self.ssh_host, remote + command],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=4, check=True,
                 )
                 value = parse_json_output(result.stdout)
+                if "error" in value:
+                    raise RuntimeError(value["error"])
                 value["connected"] = True
                 if value.get("state") == "RUNNING" and int(value.get("fault_bits", 0)) == 0:
                     self._last_running = time.monotonic()
             except Exception as exc:
-                value = {"state": "DISCONNECTED", "fault_bits": None, "connected": False, "error": str(exc)}
+                detail = str(exc)
+                if isinstance(exc, subprocess.CalledProcessError):
+                    try:
+                        detail = parse_json_output(exc.stdout).get("error", detail)
+                    except ValueError:
+                        pass
+                value = {"state": "DISCONNECTED", "fault_bits": None, "connected": False, "error": detail}
+            if command != "status":
+                self.results.put((command, value))
+                self.pending = False
             value["last_running_age_s"] = (
                 time.monotonic() - self._last_running if self._last_running else float("inf")
             )
             with self._lock:
                 self._value = value
-            self.stop.wait(1.0)
+            self.stop.wait(0.25)
+
+    def request(self, command):
+        if command not in {"left_lock", "left_follow", "right_save", "right_return", "right_pause", "right_follow"}:
+            return False
+        if self.pending:
+            return False
+        self.pending = True; self.requests.put_nowait(command)
+        return True
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -387,6 +414,8 @@ class MushroomCollectionApp:
         self.teleop_abort_requested = False
         self.operator_notice = ""
         self.operator_notice_until = 0.0
+        self.motion_vars = {side: tk.StringVar(value="正在读取姿态控制状态…") for side in ("left", "right")}
+        self.motion_buttons = {}
         self.left_ready = tk.BooleanVar(value=False); self.right_ready = tk.BooleanVar(value=False)
         self.target_confirmed = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="正在连接…"); self.message_var = tk.StringVar(value="正在初始化采集会话…")
@@ -434,7 +463,7 @@ class MushroomCollectionApp:
                              font=("Noto Sans CJK SC", 14))
             image.pack(fill="both", expand=True, padx=6, pady=(4, 6)); setattr(self, role + "_image", image)
 
-        tasks = tk.Frame(self.root, bg=BG, height=205); tasks.pack(fill="x", padx=18, pady=5); tasks.pack_propagate(False)
+        tasks = tk.Frame(self.root, bg=BG); tasks.pack(fill="x", padx=18, pady=5)
         tasks.grid_columnconfigure(0, weight=1, uniform="task"); tasks.grid_columnconfigure(1, weight=1, uniform="task")
         for column, side in enumerate(("left", "right")):
             _, title, color = TASKS[side]
@@ -447,6 +476,18 @@ class MushroomCollectionApp:
                      font=("Noto Sans CJK SC", 11)).pack(anchor="w", padx=30)
             tk.Label(card, textvariable=self.storage_vars[side], bg=PANEL, fg="#79cfe8",
                      font=("Noto Sans Mono CJK SC", 10)).pack(anchor="w", padx=30, pady=(2, 0))
+            controls = tk.Frame(card, bg=PANEL); controls.pack(fill="x", padx=12, pady=3)
+            choices = (("left_lock", "保持左臂及夹爪"), ("left_follow", "对齐后恢复左臂跟随")) if side == "left" else (
+                ("right_save", "保存起始位"), ("right_return", "回到起始位"),
+                ("right_pause", "停止回位"), ("right_follow", "对齐后恢复跟随"))
+            for index, (command, label) in enumerate(choices):
+                controls.grid_columnconfigure(index % 2, weight=1)
+                button = tk.Button(controls, text=label, command=lambda name=command: self.on_motion(name),
+                    bg="#34434c", fg="white", font=("Noto Sans CJK SC", 11), pady=5)
+                button.grid(row=index // 2, column=index % 2, sticky="ew", padx=3, pady=2)
+                self.motion_buttons[command] = button
+            tk.Label(card, textvariable=self.motion_vars[side], bg=PANEL, fg="#79cfe8",
+                     font=("Noto Sans CJK SC", 10), wraplength=650).pack(fill="x", padx=15)
             ready = self.left_ready if side == "left" else self.right_ready
             arm_name = "左" if side == "left" else "右"
             tk.Checkbutton(card, text=f"我已通过遥操将{arm_name}从臂调至 READY", variable=ready,
@@ -489,6 +530,9 @@ class MushroomCollectionApp:
         if pending:
             self.set_notice("上一个操作仍在处理，请勿重复点击。")
             return
+        if getattr(self.teleop, "pending", False):
+            self.set_notice("姿态操作尚未确认完成，请稍候。")
+            return
         if state.get("running"):
             self.set_notice("已有一条 episode 正在录制。")
             return
@@ -510,10 +554,42 @@ class MushroomCollectionApp:
         if side == "right" and not self.target_confirmed.get():
             messagebox.showwarning("目标未确认", "请确认右腕目标框内只有一朵明确待采蘑菇。")
             return
+        collection = teleop.get("collection", {})
+        if not self.args.automated_smoke_test:
+            reason = None
+            if not collection:
+                reason = "控制器尚未更新或状态不可用"
+            elif collection.get("right_mode") == "RETURNING":
+                reason = "右臂仍在回位"
+            elif side == "left" and collection.get("left_mode") != "FOLLOW":
+                reason = "请先对齐并恢复左臂跟随"
+            elif side == "right" and (collection.get("left_mode") != "HOLD" or collection.get("right_mode") != "FOLLOW"):
+                reason = "请先保持左臂，并对齐后恢复右臂跟随"
+            elif side == "right" and (collection.get("right_ready_error_rad") is None or collection["right_ready_error_rad"] > 0.07):
+                reason = "请先保存起始位，并将右臂回到该位置"
+            if reason:
+                messagebox.showwarning("采集姿态未准备好", reason); return
         task = TASKS[side][0]
         if self.args.automated_smoke_test:
             task = "TEST_" + task
         self.control.request("episode_start", task=task, target="ui_smoke_test" if self.args.automated_smoke_test else "")
+
+    def on_motion(self, command):
+        state, _, pending = self.control.snapshot()
+        if command != "right_pause" and (state.get("running") or pending):
+            self.set_notice("请先结束并保存本条数据，再进行姿态操作。")
+            return
+        if command == "right_return" and not messagebox.askyesno("右臂回到起始位",
+                "右从臂将以低速沿关节轨迹回到保存的位置，夹爪也恢复保存的开合。\n"
+                "请确认已放下所持物体，回位路径无障碍；到位后需对齐右主臂并恢复跟随。"):
+            return
+        if command == "right_save" and self.teleop.snapshot().get("collection", {}).get("saved"):
+            if not messagebox.askyesno("覆盖右臂起始位", "用当前右臂姿态和夹爪目标替换已保存的起始位？"):
+                return
+        if self.teleop.request(command):
+            self.set_notice("操作已发送，正在等待控制器确认…")
+        else:
+            self.set_notice("前一个姿态操作尚未完成。")
 
     def on_result(self, result: str) -> None:
         state, _, pending = self.control.snapshot()
@@ -537,6 +613,10 @@ class MushroomCollectionApp:
         self.control.request("episode_stop", result="aborted", failure_code="operator_safe_end")
 
     def on_close_session(self) -> None:
+        if self.teleop.snapshot().get("collection", {}).get("right_mode") == "RETURNING":
+            self.on_motion("right_pause")
+            self.set_notice("正在停止右臂回位，确认保持后再结束会话。")
+            return
         state, _, pending = self.control.snapshot()
         if state.get("running"):
             messagebox.showwarning("正在录制", "请先使用成功、失败或安全结束按钮封口当前 episode。")
@@ -550,6 +630,10 @@ class MushroomCollectionApp:
         self.close_requested = self.control.request("session_close")
 
     def on_window_close(self) -> None:
+        if self.teleop.snapshot().get("collection", {}).get("right_mode") == "RETURNING":
+            self.on_motion("right_pause")
+            self.set_notice("正在停止右臂回位，确认保持后再关闭窗口。")
+            return
         state, _, _ = self.control.snapshot()
         if state.get("running"):
             if not messagebox.askyesno("正在录制", "关闭窗口会把当前条标记为中止并封口，遥操继续运行。是否关闭？"):
@@ -577,6 +661,15 @@ class MushroomCollectionApp:
         self.close_button.configure(state="normal" if not running and not pending else "disabled")
 
     def _tick_once(self) -> None:
+        if hasattr(self.teleop, "results"):
+            try:
+                while True:
+                    command, reply = self.teleop.results.get_nowait()
+                    self.set_notice(reply.get("error") or reply.get("collection", {}).get("note", "操作已确认"), 8)
+                    if command in {"right_return", "right_save"}:
+                        self.right_ready.set(False)
+            except queue.Empty:
+                pass
         now = time.time(); latest = self.preview.latest()
         if latest:
             frames, metrics = latest
@@ -612,6 +705,20 @@ class MushroomCollectionApp:
         active = state.get("active_episode") or {}
         free_gb = state.get("free_gb", "?"); camera_text = "3/3 健康" if health.get("ok") else "相机异常"
         teleop_running = teleop.get("state") == "RUNNING" and int(teleop.get("fault_bits") or 0) == 0
+        collection = teleop.get("collection", {})
+        labels = {"FOLLOW": "跟随主臂", "HOLD": "保持中", "RETURNING": "低速回位中"}
+        for side in ("left", "right"):
+            mode = collection.get(side + "_mode")
+            error = collection.get(side + "_alignment_error_rad", 0.0)
+            extra = f"；主从对齐差 {error:.3f} rad（需 ≤0.06）" if mode == "HOLD" else ""
+            saved = ("；起始位已保存" if collection.get("saved") else "；尚未保存起始位") if side == "right" else ""
+            self.motion_vars[side].set(labels.get(mode, "等待新版控制器") + extra + saved)
+        for command, button in self.motion_buttons.items():
+            available = (not getattr(self.teleop, "pending", False) and teleop_running and bool(collection)
+                         and not running and not pending and not collection.get("recording"))
+            if command == "right_pause":
+                available = collection.get("right_mode") == "RETURNING" and not getattr(self.teleop, "pending", False)
+            button.configure(state="normal" if available else "disabled")
         self.teleop_status_label.configure(fg="#79d65a" if teleop_running else "#ff5656")
         recording_label = {
             "starting": "录制准备中",

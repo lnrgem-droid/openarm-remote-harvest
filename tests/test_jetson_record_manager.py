@@ -16,6 +16,22 @@ SPEC.loader.exec_module(manager)
 
 
 class RecorderLayoutTest(unittest.TestCase):
+    def test_motion_rejection_creates_no_episode_and_does_not_advance_number(self):
+        manager.shutil.disk_usage = lambda _path: type("Usage", (), {"free": 100 * 1024 ** 3})()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); recorder = manager.Recorder(root)
+            recorder.allowed_storage_root = root; recorder.session_base = root / "sessions"
+            recorder.session_state_path = root / "active-session.json"
+            recorder.start_session(); recorder._camera_health = lambda: {"ok": True}
+            def reject(*args, **kwargs):
+                raise RuntimeError("请先保持左臂")
+            recorder._motion_request = reject
+            result = recorder.start_episode("RIGHT_PICK_ONE")
+            self.assertFalse(result["ok"])
+            self.assertIn("保持左臂", result["error"])
+            self.assertFalse(list((recorder.session_root / "episodes/right").iterdir()))
+            self.assertEqual(recorder.next_episode_by_task["right"], 1)
+
     def test_new_select_and_continue_session_modes_are_explicit(self) -> None:
         manager.shutil.disk_usage = lambda _path: type("Usage", (), {"free": 100 * 1024 ** 3})()
         with tempfile.TemporaryDirectory(prefix="openarm-recorder-test-") as temporary:
@@ -86,6 +102,7 @@ class RecorderLayoutTest(unittest.TestCase):
                 return {"ok": True, **recorder.status()}
 
             recorder.start = fake_start
+            recorder._motion_request = lambda *_args, **_fields: {"collection": {"left_mode": "FOLLOW"}}
             response = recorder.start_episode("LEFT_GRASP_LOG")
             self.assertTrue(response["ok"])
             self.assertEqual(recorder.active_episode["episode_number"], 2)
