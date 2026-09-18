@@ -45,6 +45,7 @@ class LeaderGateway(Node):
         # Reference pair and short action history let us distinguish genuine
         # follower contact error from ordinary network transport delay.
         self.haptic_reference = None
+        self.collection_flags = 0
         self.action_history = {}
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
@@ -64,6 +65,17 @@ class LeaderGateway(Node):
         Free motion produces zero torque; contact produces a bounded opposing
         torque on the corresponding leader joint.
         """
+        if state.collection_flags != self.collection_flags:
+            # Detaching one arm must not reset the other arm's contact cue.
+            applied = self.action_history.get(state.applied_action_sequence)
+            if self.haptic_reference is not None and applied is not None:
+                leader_ref, follower_ref = map(list, self.haptic_reference)
+                for bit, offset in ((1, 0), (2, 8)):
+                    if (state.collection_flags ^ self.collection_flags) & bit:
+                        leader_ref[offset:offset+8] = applied[offset:offset+8]
+                        follower_ref[offset:offset+8] = state.positions[offset:offset+8]
+                self.haptic_reference = (tuple(leader_ref), tuple(follower_ref))
+            self.collection_flags = state.collection_flags
         if state.control_state.name != "RUNNING" or state.fault_bits:
             efforts = [0.0] * 8
             left_efforts = [0.0] * 8
@@ -86,6 +98,10 @@ class LeaderGateway(Node):
             virtual_torque = [gain * delta for gain, delta in zip(gains, error)]
             efforts = virtual_torque[8:16]
             left_efforts = virtual_torque[0:8]
+        if state.collection_flags & 1:
+            left_efforts = [0.0] * 8
+        if state.collection_flags & 2:
+            efforts = [0.0] * 8
         right = JointState(); right.effort = efforts
         self.right_force_pub.publish(right)
         if self.enable_left:

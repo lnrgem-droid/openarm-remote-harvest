@@ -143,6 +143,9 @@ class FollowerState:
     # Estimated contact torque [Nm], with follower gravity and commanded PD
     # torque removed.  Gripper values are currently zero.
     efforts: tuple[float, ...] = (0.0,) * AXIS_COUNT
+    # Header bits: 1=left locally held, 2=right locally held/returning.
+    # These suppress haptics on the detached leader, not motor enablement.
+    collection_flags: int = 0
 
     def __post_init__(self) -> None:
         for field in ("session_id", "sequence", "sender_monotonic_ns", "obs_timestamp_ns"):
@@ -166,20 +169,22 @@ class FollowerState:
         object.__setattr__(self, "positions", _axis_tuple(self.positions, "positions"))
         object.__setattr__(self, "velocities", _axis_tuple(self.velocities, "velocities"))
         object.__setattr__(self, "efforts", _axis_tuple(self.efforts, "efforts"))
+        if self.collection_flags not in (0, 1, 2, 3):
+            raise PacketError("invalid collection flags")
 
 
 Message = Union[ActionCommand, FollowerState]
 
 
 def _encode(message_type: MessageType, session_id: int, sequence: int,
-            sender_monotonic_ns: int, payload: bytes) -> bytes:
+            sender_monotonic_ns: int, payload: bytes, flags: int = 0) -> bytes:
     if len(payload) + _HEADER.size > MAX_DATAGRAM_SIZE:
         raise PacketError("datagram exceeds the protocol MTU budget")
     header_zero_crc = _HEADER.pack(
         MAGIC,
         PROTOCOL_VERSION,
         int(message_type),
-        0,
+        flags,
         _uint64(session_id, "session_id"),
         _uint64(sequence, "sequence"),
         _uint64(sender_monotonic_ns, "sender_monotonic_ns"),
@@ -191,7 +196,7 @@ def _encode(message_type: MessageType, session_id: int, sequence: int,
         MAGIC,
         PROTOCOL_VERSION,
         int(message_type),
-        0,
+        flags,
         session_id,
         sequence,
         sender_monotonic_ns,
@@ -228,6 +233,7 @@ def encode_state(state: FollowerState) -> bytes:
         state.sequence,
         state.sender_monotonic_ns,
         payload,
+        state.collection_flags,
     )
 
 
@@ -244,8 +250,8 @@ def decode_message(datagram: bytes) -> Message:
         raise PacketError("bad protocol magic")
     if version != PROTOCOL_VERSION:
         raise PacketError(f"unsupported protocol version {version}")
-    if flags != 0:
-        raise PacketError("v1 flags must be zero")
+    if flags & ~3 or (raw_type != int(MessageType.FOLLOWER_STATE) and flags):
+        raise PacketError("invalid message flags")
     if len(datagram) != _HEADER.size + length:
         raise PacketError("payload length does not match datagram length")
 
@@ -291,6 +297,7 @@ def decode_message(datagram: bytes) -> Message:
         positions=axes[:AXIS_COUNT],
         velocities=axes[AXIS_COUNT:2 * AXIS_COUNT],
         efforts=axes[2 * AXIS_COUNT:],
+        collection_flags=flags,
     )
 
 

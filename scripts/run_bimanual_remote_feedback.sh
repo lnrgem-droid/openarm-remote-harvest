@@ -69,7 +69,7 @@ release_startup_holds() {
 }
 
 check_jetson_python_runtime() {
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && /usr/bin/python3 -c 'from remote_teleop_runtime.common import FOLLOWER_LEFT_COMMAND_TOPIC; from remote_teleop_runtime.follower import FollowerGateway'"
+  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_runtime.follower import FollowerGateway; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, \"collection_flags\")'"
 }
 
 repair_jetson_python_runtime() {
@@ -81,6 +81,9 @@ repair_jetson_python_runtime() {
 
   echo 'Jetson Python runtime is inconsistent; synchronizing the complete runtime package...'
   rsync -a --include='*.py' --exclude='*' "$package_source" "$JETSON_HOST:$installed_package"
+  rsync -a --include='*.py' --exclude='*' \
+    "$ROS_DIR/src/remote_teleop_protocol/remote_teleop_protocol/" \
+    "$JETSON_HOST:$JETSON_ROOT/ros2_robot/install_bimanual/remote_teleop_protocol/lib/python3.10/site-packages/remote_teleop_protocol/"
   rsync -a "$config_source/bimanual_leader.yaml" "$config_source/bimanual_follower.yaml" \
     "$JETSON_HOST:$installed_config"
   rsync -a "$config_source/bimanual_leader.yaml" "$config_source/bimanual_follower.yaml" \
@@ -88,6 +91,10 @@ repair_jetson_python_runtime() {
 }
 
 verify_runtime_builds() {
+  /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, "collection_flags")' || {
+    echo 'ERROR: 主机遥操 Python 包未更新，请重新构建 remote_teleop_protocol 和 remote_teleop_runtime。' >&2
+    return 1
+  }
   if [[ ! -x "$HOST_CONTROL_NODE" ]] || ! strings "$HOST_CONTROL_NODE" | grep -F "$HOME_MARKER" >/dev/null; then
     echo "ERROR: 主机 install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先重新编译。" >&2
     return 1
