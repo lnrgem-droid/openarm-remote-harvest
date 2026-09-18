@@ -478,8 +478,8 @@ class MushroomCollectionApp:
                      font=("Noto Sans Mono CJK SC", 10)).pack(anchor="w", padx=30, pady=(2, 0))
             controls = tk.Frame(card, bg=PANEL); controls.pack(fill="x", padx=12, pady=3)
             choices = (("left_lock", "保持左臂及夹爪"), ("left_follow", "对齐后恢复左臂跟随")) if side == "left" else (
-                ("right_save", "保存起始位"), ("right_return", "回到起始位"),
-                ("right_pause", "停止回位"), ("right_follow", "对齐后恢复跟随"))
+                ("right_save", "保存主从起始位"), ("right_return", "主从一起回位"),
+                ("right_pause", "停止双端回位"), ("right_follow", "异常后恢复跟随"))
             for index, (command, label) in enumerate(choices):
                 controls.grid_columnconfigure(index % 2, weight=1)
                 button = tk.Button(controls, text=label, command=lambda name=command: self.on_motion(name),
@@ -579,12 +579,13 @@ class MushroomCollectionApp:
         if command != "right_pause" and (state.get("running") or pending):
             self.set_notice("请先结束并保存本条数据，再进行姿态操作。")
             return
-        if command == "right_return" and not messagebox.askyesno("右臂回到起始位",
-                "右从臂将以低速沿关节轨迹回到保存的位置，夹爪也恢复保存的开合。\n"
-                "请确认已放下所持物体，回位路径无障碍；到位后需对齐右主臂并恢复跟随。"):
+        if command == "right_return" and not messagebox.askyesno("右主从臂一起回位",
+                "右主臂和右从臂都将低速运动，两个夹爪也会恢复保存的开合。\n"
+                "请松开右主臂及夹爪，放好所持物体，确认两端路径无障碍。\n"
+                "两端到位并确认解除回位伺服后自动恢复跟随；不会自动录制。"):
             return
         if command == "right_save" and self.teleop.snapshot().get("collection", {}).get("saved"):
-            if not messagebox.askyesno("覆盖右臂起始位", "用当前右臂姿态和夹爪目标替换已保存的起始位？"):
+            if not messagebox.askyesno("覆盖右臂起始位", "保存当前右主臂、右从臂和两端夹爪，替换原起始位？"):
                 return
         if self.teleop.request(command):
             self.set_notice("操作已发送，正在等待控制器确认…")
@@ -711,6 +712,11 @@ class MushroomCollectionApp:
             mode = collection.get(side + "_mode")
             error = collection.get(side + "_alignment_error_rad", 0.0)
             extra = f"；主从对齐差 {error:.3f} rad（需 ≤0.06）" if mode == "HOLD" else ""
+            if side == "right" and mode == "RETURNING":
+                extra = {"resetting": "；准备双端回位，请松开右主臂",
+                         "preparing": "；等待主臂控制确认，请松开右主臂",
+                         "moving": "；主从一起运动，请勿触碰",
+                         "releasing": "；已到位，确认恢复跟随中"}.get(collection.get("return_phase"), "")
             saved = ("；起始位已保存" if collection.get("saved") else "；尚未保存起始位") if side == "right" else ""
             self.motion_vars[side].set(labels.get(mode, "等待新版控制器") + extra + saved)
         for command, button in self.motion_buttons.items():
