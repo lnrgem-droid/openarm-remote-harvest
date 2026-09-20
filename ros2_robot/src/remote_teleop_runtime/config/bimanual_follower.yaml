@@ -16,6 +16,11 @@
     # visible steady-state error under the wrist camera/gripper payload.
     kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 10.0]
     kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.5]
+    # 2026-09-20: left J7 alone showed 0.121 rad static error while the actual
+    # CAN target matched the leader. First incremental stiffness/damping trial;
+    # right arm, startup homing and leader haptics retain their previous gains.
+    left_kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 15.0]
+    left_kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.6]
     # Match the upstream follower gripper stiffness so both jaws can close
     # firmly against the printed fingers.
     gripper_kp: 10.0

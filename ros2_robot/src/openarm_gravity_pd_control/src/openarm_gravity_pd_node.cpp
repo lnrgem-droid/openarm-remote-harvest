@@ -48,6 +48,7 @@
 #include <std_srvs/srv/set_bool.hpp>
 
 #include "openarm_gravity_pd_control/arm_controller.hpp"
+#include "openarm_gravity_pd_control/pd_gains.hpp"
 
 using openarm_gravity_pd_control::ArmControlParams;
 using openarm_gravity_pd_control::ArmController;
@@ -80,6 +81,10 @@ public:
     declare_parameter("grav_scale",    0.95);
     declare_parameter("kp", std::vector<double>{50.0, 50.0, 50.0, 40.0, 8.0, 8.0, 8.0});
     declare_parameter("kd", std::vector<double>{ 2.0,  2.0,  1.5,  1.5, 0.5, 0.5, 0.4});
+    declare_parameter("left_kp", std::vector<double>{});
+    declare_parameter("left_kd", std::vector<double>{});
+    declare_parameter("right_kp", std::vector<double>{});
+    declare_parameter("right_kd", std::vector<double>{});
     declare_parameter(
       "max_joint_vel", std::vector<double>{1.0, 1.0, 1.5, 1.5, 2.0, 2.0, 2.0});
     declare_parameter("gripper_kp",      16.0);
@@ -239,6 +244,21 @@ public:
     RCLCPP_INFO(get_logger(), "ROS routes    : state=%s command=%s disable=%s",
       joint_states_topic.c_str(), right_command_topic.c_str(), disable_service.c_str());
 
+    // Per-arm normal tracking gains: startup homing, leader bilateral gains,
+    // gravity compensation and force limits remain unchanged.
+    auto left_params = params;
+    auto right_params = params;
+    for (auto entry : {std::make_pair("left", &left_params),
+                       std::make_pair("right", &right_params)}) {
+      const std::string prefix(entry.first);
+      entry.second->kp = openarm_gravity_pd_control::resolvePdGains(
+        params.kp, get_parameter(prefix + "_kp").as_double_array(), 500.0, prefix + "_kp");
+      entry.second->kd = openarm_gravity_pd_control::resolvePdGains(
+        params.kd, get_parameter(prefix + "_kd").as_double_array(), 5.0, prefix + "_kd");
+      RCLCPP_INFO(get_logger(), "%s normal J7 gains: Kp=%.3f Kd=%.3f (startup/bilateral unchanged)",
+        prefix.c_str(), entry.second->kp[6], entry.second->kd[6]);
+    }
+
     // ── Create arm controllers ─────────────────────────────────────────────
     // Construct both controllers before either one begins startup homing.  The
     // two CAN buses are independent, so homing them in parallel prevents the
@@ -248,12 +268,12 @@ public:
     if (enable_right) {
       right_arm_ = std::make_unique<ArmController>(
         right_can, urdf_path, "openarm_body_link0", "openarm_right_hand",
-        ArmSide::kRight, joint_limits_path, params, get_logger());
+        ArmSide::kRight, joint_limits_path, right_params, get_logger());
     }
     if (enable_left) {
       left_arm_ = std::make_unique<ArmController>(
         left_can, urdf_path, "openarm_body_link0", "openarm_left_hand",
-        ArmSide::kLeft, joint_limits_path, params, get_logger());
+        ArmSide::kLeft, joint_limits_path, left_params, get_logger());
     }
 
     bool right_init_ok = true;
