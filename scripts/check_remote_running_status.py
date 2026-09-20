@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from typing import Any
 
@@ -26,7 +27,8 @@ def parse_status(text: str) -> dict[str, Any]:
 def is_healthy_running(
     status: dict[str, Any], max_tracking_error_rad: float | None = None
 ) -> bool:
-    """True only when moving a leader is expected to move both followers."""
+    """Control stack is healthy; individual HOLD/RETURNING modes still apply."""
+    age = float(status.get("action_age_ms", float("inf")))
     healthy = (
         status.get("state") == "RUNNING"
         and int(status.get("fault_bits", -1)) == 0
@@ -34,7 +36,7 @@ def is_healthy_running(
         and set(status.get("enabled_arms", [])) == {"left", "right"}
         and status.get("leader_session_id") not in (None, 0)
         and status.get("feedback_fresh_for_control") is True
-        and float(status.get("action_age_ms", float("inf"))) <= 100.0
+        and math.isfinite(age) and 0.0 <= age <= 100.0
     )
     if not healthy or max_tracking_error_rad is None:
         return healthy

@@ -12,6 +12,8 @@
 # Enable nounset only after sourcing them.
 set -eo pipefail
 
+ssh() { command ssh -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"; }
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROS_DIR="$ROOT_DIR/ros2_robot"
 JETSON_HOST="${JETSON_HOST:-openarm-jetson}"

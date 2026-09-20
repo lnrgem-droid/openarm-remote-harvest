@@ -27,9 +27,13 @@ def test_resume_requires_alignment_and_ramps(tmp_path):
         execute(m, "left_follow", leader=shifted)
     shifted[0] = .05
     execute(m, "left_follow", leader=shifted)
+    assert m.status(Q, shifted)["transitioning_arms"] == ["left"]
     m.update(Q, shifted, 1., True)
     first = m.update(Q, shifted, 1.01, True)
     assert first[0] <= .001501
+    for step in range(100):
+        m.update(Q, shifted, 1.02 + step * .01, True)
+    assert m.status(Q, shifted)["transitioning_arms"] == []
 
 
 def test_saved_pose_survives_restart_and_return_is_bounded(tmp_path):
@@ -91,6 +95,14 @@ def test_corrupted_or_out_of_bounds_pose_rejected(tmp_path):
     with pytest.raises(ValueError, match="限位"):
         execute(m, "right_save", actual=bad, applied=bad)
     assert json.loads(path.read_text()) == {"bad": 1}
+
+
+def test_valid_json_with_wrong_root_type_does_not_crash_gateway(tmp_path):
+    path = tmp_path / "pose.json"
+    for value in ([], None, "wrong", 42):
+        path.write_text(json.dumps(value))
+        motion = CollectionMotion(path)
+        assert motion.saved is None and "不可用" in motion.note
 
 
 def test_tracking_error_aborts_motion(tmp_path):

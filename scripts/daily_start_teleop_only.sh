@@ -2,6 +2,8 @@
 # Daily operator entrypoint: teleoperation only, never start RGB-D recording.
 set -euo pipefail
 
+ssh() { command ssh -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"; }
+
 ROOT_DIR="/home/openarm/dev/openarm-remote-harvest"
 JETSON_HOST="${JETSON_HOST:-openarm-jetson}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
@@ -46,7 +48,7 @@ ensure_no_recording() {
   ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"'
 import sys, zmq
 try:
-    c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 3000); s.connect("tcp://127.0.0.1:5557")
+    c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.SNDTIMEO, 3000); s.setsockopt(zmq.RCVTIMEO, 3000); s.connect("tcp://127.0.0.1:5557")
     s.send_json({"command":"status"}); reply=s.recv_json(); print(reply)
 except Exception as exc:
     print(f"Jetson recorder unavailable; teleop-only mode will not record ({exc}).")

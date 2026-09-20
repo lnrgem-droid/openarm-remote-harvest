@@ -3,6 +3,8 @@
 # Recording is started only by the operator button in the preview window.
 set -euo pipefail
 
+ssh() { command ssh -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"; }
+
 TELEOP_ROOT="/home/openarm/dev/openarm-remote-harvest"
 RGBD_ROOT="/home/openarm/dev/openarm-rgbd-preview"
 # The existing desktop launcher intentionally keeps its original console as the
@@ -41,10 +43,10 @@ status_is_healthy_running() {
 }
 
 status_is_safe_to_reuse() {
-  # Fresh network traffic alone is insufficient after the arms have been
-  # power-cycled while the long-running controller process stayed alive.
+  # Position error alone cannot prove the motors are powered. More importantly,
+  # a held/contact-loaded arm must NEVER cause opening the UI to re-home it.
   /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" \
-    --max-tracking-error-rad 0.05 <<<"$1"
+    --max-tracking-error-rad 0.20 <<<"$1"
 }
 
 refresh_healthy_running_status() {
@@ -162,10 +164,10 @@ stop_recording_on_exit() {
   # Closing the preview window must not leave a hidden recording running.
   ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"' || true
 import zmq
-c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557")
+c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.SNDTIMEO, 2000); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557")
 s.send_json({"command":"status"}); status=s.recv_json()
 if status.get("running"):
-    s.close(0); c.term(); c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557"); s.send_json({"command":"stop"}); print(s.recv_json())
+    s.close(0); c.term(); c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.SNDTIMEO, 2000); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557"); s.send_json({"command":"stop"}); print(s.recv_json())
 PY'
 }
 
@@ -177,7 +179,7 @@ import time, zmq
 endpoint = "tcp://127.0.0.1:5557"
 def request(command):
     context = zmq.Context(); socket = context.socket(zmq.REQ)
-    socket.setsockopt(zmq.LINGER, 0); socket.setsockopt(zmq.RCVTIMEO, 3000)
+    socket.setsockopt(zmq.LINGER, 0); socket.setsockopt(zmq.SNDTIMEO, 3000); socket.setsockopt(zmq.RCVTIMEO, 3000)
     socket.connect(endpoint); socket.send_json({"command": command})
     response = socket.recv_json(); socket.close(0); context.term(); return response
 status = request("status")
@@ -226,11 +228,18 @@ echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_COR
 # FAULT.  A regular unit has atomic, repeatable restart semantics.
 ensure_teleop_service
 status="$(teleop_status)"
-if systemctl --user is-active --quiet "$TELEOP_SERVICE" && refresh_healthy_running_status; then
+if refresh_healthy_running_status; then
   say "3/5 复用已经运行的双臂遥操"
   echo "  机械臂可能运动：是；现有主从跟随保持不变，不重新归零"
-  echo "  现在可以遥操：是"
+  echo "  现在可以遥操：仅处于 FOLLOW 的手臂；HOLD/回位状态保持不变"
   echo "  遥操状态：RUNNING；重复打开采集界面不会中断现有控制。"
+elif systemctl --user is-active --quiet "$TELEOP_SERVICE" ||
+     grep -Eq '"state": "(RUNNING|FAULT|E_STOP)"' <<<"$status"; then
+  echo 'ERROR: 已有控制栈但健康检查未通过。本次只退出启动，不自动重启或归零。' >&2
+  echo '请查看控制状态与故障，安置好物体后再明确重新启动遥操核心脚本。' >&2
+  echo '确认主从运动路径安全后，可执行：systemctl --user restart openarm-remote-teleop.service（会重新归位）。' >&2
+  echo "$status" >&2
+  exit 2
 else
   say "3/5 启动受控双臂遥操"
   echo "  机械臂可能运动：是；主从左右臂将依次自动回到初始位"
@@ -271,12 +280,12 @@ else
     exit 1
   fi
 fi
-echo "  机械臂可能运动：是；从臂会跟随主臂"
-echo "  现在可以遥操：是"
-echo "  遥操状态：RUNNING，左右臂开始一一对应跟随。"
+echo "  机械臂可能运动：是；各臂按 FOLLOW/HOLD/回位模式运行"
+echo "  现在可以遥操：仅 FOLLOW 手臂；请查看界面的左右臂模式"
+echo "  遥操控制栈：RUNNING（不代表处于 HOLD 的手臂也会跟随）。"
 say "4/5 准备 Jetson 本地 RGB-D 采集"
 echo "  机械臂可能运动：是（遥操继续运行，本步骤不会额外驱动机械臂）"
-echo "  现在可以遥操：是"
+echo "  现在可以遥操：仅 FOLLOW 手臂；HOLD 手臂保持不动"
 echo "  你现在应当：等待确认录制状态；此时不会自动开始录制"
 ensure_recording_idle
 trap stop_recording_on_exit EXIT
@@ -284,7 +293,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 say "5/5 打开主机实时预览"
 echo "  机械臂可能运动：是（遥操继续运行）"
-echo "  现在可以遥操：是"
+echo "  现在可以遥操：仅 FOLLOW 手臂；HOLD 手臂保持不动"
 echo "当前只打开实时预览和正式采集会话界面，不会自动录制。"
 echo "选择任务后点击“开始本 episode”；结束时明确选择成功、失败或中止。"
 echo "停止录制只停止数据保存，不会停止机械臂遥操。"

@@ -48,6 +48,8 @@ class CollectionMotion:
         self.last_update = None
         try:
             data = json.loads(self.path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("起始位必须是 JSON 对象")
             if data.get("schema_version") != 2:
                 raise ValueError("起始位版本不匹配")
             self.validate_saved(data)
@@ -91,6 +93,7 @@ class CollectionMotion:
             "right_mode": "RETURNING" if self.returning else "HOLD" if self.right is not None else "FOLLOW",
             "saved": self.saved, "note": self.note, "recording": self.recording,
             "return_phase": self.phase,
+            "transitioning_arms": [side for side, value in self.transition.items() if value is not None],
             "left_alignment_error_rad": distance(leader[:8], self.left) if self.left else 0.0,
             "right_alignment_error_rad": distance(leader[8:16], self.right) if self.right else 0.0,
             "right_ready_error_rad": distance(actual[8:15], self.saved["actual"][:7]) if self.saved else None,
@@ -196,7 +199,7 @@ class CollectionMotion:
     def update(self, actual, requested, now, healthy, leader=None, leader_ack=0):
         if leader is not None:
             if self.leader_now is not None and self.last_update is not None and now > self.last_update:
-                self.leader_speed = distance(leader[8:15], self.leader_now[8:15]) / (now-self.last_update)
+                self.leader_speed = distance(leader[8:16], self.leader_now[8:16]) / (now-self.last_update)
             self.leader_now = tuple(leader)
         dt = min(0.02, max(0.0, now-self.last_update)) if self.last_update is not None else 0.0
         self.last_update = now
@@ -209,6 +212,8 @@ class CollectionMotion:
                 self.phase = "preparing"; self.started = now
                 self.leader_start = pose(self.leader_now[8:16])
                 self.leader_target = self.leader_start
+                self.duration = max(self.duration, 1.875 * max(abs(a-b)/v for a,b,v in zip(
+                    self.leader_start, self.saved["leader"], [0.15]*7+[0.25])))
             elif now-self.started > 2.0:
                 self.interrupt(actual, "右主臂无法解除旧回位状态")
         if self.returning and leader_ack == 2 and self.phase not in {"resetting", "releasing"}:

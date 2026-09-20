@@ -28,6 +28,11 @@ class RunningContractTest(unittest.TestCase):
     def test_complete_contract_passes(self):
         self.assertTrue(check.is_healthy_running(self.healthy()))
 
+    def test_invalid_age_is_not_fresh(self):
+        for age in (-1., float("inf"), float("nan")):
+            state = self.healthy(); state["action_age_ms"] = age
+            self.assertFalse(check.is_healthy_running(state))
+
     def test_each_motion_gate_is_mandatory(self):
         changes = {
             "state": "READY",
