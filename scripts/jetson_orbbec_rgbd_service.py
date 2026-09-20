@@ -128,6 +128,7 @@ class DepthSpooler:
         self.written = {role: 0 for role in roles}
         self.dropped = {role: 0 for role in roles}
         self.error: str | None = None
+        self.stop_sent = set()
 
     def _fail(self, reason: str) -> None:
         if self.error is None:
@@ -139,23 +140,47 @@ class DepthSpooler:
                 LOG.exception("failed to write RGB-D error marker")
         ACTIVE_MARKER.unlink(missing_ok=True)
 
-    def _close(self) -> None:
-        for item_queue in self.queues.values():
-            # A dead writer may leave a full queue. Shutdown must not block.
-            while True:
+    def _close(self) -> bool:
+        if self.root is None:
+            return True
+        # Put a sentinel AFTER accepted frames. Previously every stop silently
+        # discarded up to eight queued frames per camera.
+        for role, item_queue in self.queues.items():
+            if role not in self.stop_sent and self.workers[role].is_alive():
                 try:
-                    item_queue.get_nowait()
-                except queue.Empty:
-                    break
-            try:
-                item_queue.put_nowait(None)
-            except queue.Full:
-                pass
+                    item_queue.put(None, timeout=.2)
+                    self.stop_sent.add(role)
+                except queue.Full:
+                    return False
+        deadline = time.monotonic() + 2.0
         for worker in self.workers.values():
-            worker.join(timeout=10.0)
+            worker.join(timeout=max(0, deadline-time.monotonic()))
+        if any(worker.is_alive() for worker in self.workers.values()):
+            return False  # Never close files underneath a live writer.
         for stream in [*self.data.values(), *self.rgb.values(), *self.meta.values()]:
-            stream.close()
+            try:
+                stream.flush()
+                os.fsync(stream.fileno())
+                stream.close()
+            except OSError as exc:
+                self._fail(f"RGB-D flush failed: {exc}")
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        receipt = Path(self.root) / "rgbd-complete.json"
+        temporary = receipt.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps({"dataset_root": self.root,
+                "complete": self.error is None and not any(self.dropped.values()),
+                "written": self.written, "dropped": self.dropped, "error": self.error,
+                "closed_unix_s": time.time()}, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(receipt)
+        except OSError as exc:
+            self._fail(f"RGB-D receipt write failed: {exc}")
         self.root = None; self.data = {}; self.rgb = {}; self.meta = {}; self.queues = {}; self.workers = {}
+        self.stop_sent = set()
+        return True
 
     def _writer(self, role: str) -> None:
         item_queue = self.queues[role]
@@ -173,7 +198,7 @@ class DepthSpooler:
                                "offset_bytes": depth_offset, "nbytes": int(depth.nbytes)})
                 self.meta[role].write(json.dumps(record) + "\n")
                 self.written[role] += 1
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 self._fail(f"{role} RGB-D write failed: {exc}")
                 return
 
@@ -189,7 +214,8 @@ class DepthSpooler:
             return
         if root != self.root:
             if self.root is not None:
-                self._close()
+                if not self._close():
+                    return
             out = os.path.join(root, "depth_raw")
             os.makedirs(out, exist_ok=True)
             rgb_out = os.path.join(root, "rgb_raw")

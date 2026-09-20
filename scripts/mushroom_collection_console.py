@@ -204,12 +204,18 @@ class SessionControl:
             socket.setsockopt(zmq.LINGER, 0); socket.setsockopt(zmq.SNDTIMEO, 3000); socket.setsockopt(zmq.RCVTIMEO, 5000)
             try:
                 socket.connect(self.endpoint); socket.send_json({"command": command, **extra}); response = socket.recv_json()
+                if not isinstance(response, dict):
+                    raise ValueError("录制服务返回的状态不是 JSON 对象")
                 with self._lock:
+                    if command == "status" and self._pending and self._value.get("phase") == "stopping":
+                        response["phase"] = "stopping"
                     self._value = response
                     if not response.get("ok"):
                         self._message = "请求被拒绝：" + str(response.get("error", "未知错误"))
                     elif response.get("phase") == "stopping":
                         self._message = "正在安全封口；机械臂遥操继续运行。"
+                    elif response.get("phase") == "starting":
+                        self._message = "本条正在准备，尚未正式录制；请等待“正在录制”提示。"
                     elif response.get("running"):
                         episode = response.get("active_episode") or {}
                         self._message = f"正在录制 {episode.get('task', '当前任务')}：数据写入 Jetson"
@@ -374,12 +380,20 @@ class TeleopMonitor:
                     self._last_running = time.monotonic()
             except Exception as exc:
                 detail = str(exc)
+                rejected = False
                 if isinstance(exc, subprocess.CalledProcessError):
                     try:
-                        detail = parse_json_output(exc.stdout).get("error", detail)
+                        reply = parse_json_output(exc.stdout)
+                        detail = reply.get("error", detail)
+                        rejected = bool(reply.get("error"))
                     except ValueError:
                         pass
-                value = {"state": "DISCONNECTED", "fault_bits": None, "connected": False, "error": detail}
+                if rejected:
+                    # A valid rejection (e.g. not aligned) proves connectivity;
+                    # it is not a network outage and must not falsify RUNNING.
+                    value = {**self.snapshot(), "connected": True, "error": detail}
+                else:
+                    value = {"state": "DISCONNECTED", "fault_bits": None, "connected": False, "error": detail}
             if command != "status":
                 self.results.put((command, value))
                 self.pending = False
@@ -561,6 +575,8 @@ class MushroomCollectionApp:
                 reason = "控制器尚未更新或状态不可用"
             elif collection.get("right_mode") == "RETURNING":
                 reason = "右臂仍在回位"
+            elif collection.get("transitioning_arms"):
+                reason = "正在平滑恢复跟随，请稍候再开始录制"
             elif side == "left" and collection.get("left_mode") != "FOLLOW":
                 reason = "请先对齐并恢复左臂跟随"
             elif side == "right" and (collection.get("left_mode") != "HOLD" or collection.get("right_mode") != "FOLLOW"):
@@ -712,6 +728,8 @@ class MushroomCollectionApp:
             mode = collection.get(side + "_mode")
             error = collection.get(side + "_alignment_error_rad", 0.0)
             extra = f"；主从对齐差 {error:.3f} rad（需 ≤0.06）" if mode == "HOLD" else ""
+            if side in collection.get("transitioning_arms", []):
+                extra = "；正在平滑衔接，请稍候再录制"
             if side == "right" and mode == "RETURNING":
                 extra = {"resetting": "；准备双端回位，请松开右主臂",
                          "preparing": "；等待主臂控制确认，请松开右主臂",

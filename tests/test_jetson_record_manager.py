@@ -14,6 +14,16 @@ manager = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(manager)
 
+# Never read the real Jetson session or unlink real recording markers in tests.
+RealRecorder = manager.Recorder
+class IsolatedRecorder(RealRecorder):
+    def __init__(self, root):
+        super().__init__(root, runtime_dir=root / "runtime", storage_root=root)
+        self.active_marker = root / "recording.active"
+        self.error_marker = root / "recording.error"
+        self.camera_status_path = root / "camera-status.json"
+manager.Recorder = IsolatedRecorder
+
 
 class RecorderLayoutTest(unittest.TestCase):
     def test_motion_rejection_creates_no_episode_and_does_not_advance_number(self):

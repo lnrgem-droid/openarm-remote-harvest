@@ -116,6 +116,11 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.app.on_start("right")
         self.assertNotEqual(self.app.control.calls[-1][0], "episode_start")
         self.app.teleop.value["collection"].update(left_mode="HOLD", saved={}, right_ready_error_rad=.02)
+        self.app.teleop.value["collection"]["transitioning_arms"] = ["right"]
+        self.app.on_start("right")
+        self.assertNotEqual(self.app.control.calls[-1][0], "episode_start")
+        self.assertIn("平滑", self.warnings[-1][1])
+        self.app.teleop.value["collection"]["transitioning_arms"] = []
         self.app.on_start("right")
         self.assertEqual(self.app.control.calls[-1][0], "episode_start")
 

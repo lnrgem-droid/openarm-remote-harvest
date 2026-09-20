@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import select
 import signal
@@ -53,6 +54,19 @@ def applied_action(data: dict) -> list[float]:
     return [float(v) for v in (*left, *right)]
 
 
+def validated_sample(data: dict):
+    if not all(math.isfinite(float(value)) for side in ("left_arm", "right_arm")
+               for value in data[side]["position"][:8]):
+        raise ValueError("state contains non-finite values")
+    state, action = normalized_state(data), applied_action(data)
+    if not all(math.isfinite(value) for value in state + action):
+        raise ValueError("state/action contains non-finite values")
+    received = float(data.get("teleop_action", {}).get("recv_time", 0))
+    if not 0 <= time.time() - received <= .25:
+        raise ValueError("applied action is stale")
+    return state, action
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
@@ -60,6 +74,8 @@ def main() -> int:
     parser.add_argument("--ws-url", default="ws://127.0.0.1:9000")
     parser.add_argument("--fps", type=float, default=30.0)
     args = parser.parse_args()
+    if not math.isfinite(args.fps) or args.fps <= 0:
+        raise SystemExit("fps must be positive and finite")
     if args.root.exists():
         raise SystemExit(f"refusing to overwrite existing root: {args.root}")
 
@@ -76,61 +92,69 @@ def main() -> int:
     started_mono: float | None = None
     started_unix_ns: int | None = None
 
-    with connect(args.ws_url, open_timeout=5, close_timeout=2) as ws:
-        # Do not claim the episode directory until both state and the applied
-        # action are valid. The manager uses this mkdir as its RECORDING gate.
-        while not stop_requested:
-            raw = ws.recv(timeout=5)
-            message = json.loads(raw)
-            if message.get("type") != "state":
-                continue
-            data = message.get("data", {})
-            try:
-                state = normalized_state(data)
-                action = applied_action(data)
-            except (KeyError, TypeError, ValueError):
-                continue
-            args.root.mkdir(parents=True, exist_ok=False)
-            (args.root / "data" / "chunk-000").mkdir(parents=True)
-            (args.root / "meta").mkdir()
-            started_mono = time.monotonic()
-            started_unix_ns = time.time_ns()
-            break
-
-        next_sample = time.monotonic()
-        latest: tuple[list[float], list[float]] | None = (state, action) if started_mono is not None else None
-        while not stop_requested and started_mono is not None:
-            if select.select([0], [], [], 0)[0] and os.read(0, 64).lower().find(b"q") >= 0:
-                break
-            timeout = max(0.0, min(period, next_sample - time.monotonic()))
-            try:
-                raw = ws.recv(timeout=timeout)
+    failure = None
+    try:
+        with connect(args.ws_url, open_timeout=5, close_timeout=2) as ws:
+            # Do not claim the episode directory until both state and the applied
+            # action are valid. The manager uses this mkdir as its RECORDING gate.
+            while not stop_requested:
+                raw = ws.recv(timeout=5)
                 message = json.loads(raw)
-                if message.get("type") == "state":
-                    data = message.get("data", {})
-                    latest = (normalized_state(data), applied_action(data))
-            except TimeoutError:
-                pass
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                continue
-            now = time.monotonic()
-            if now < next_sample or latest is None:
-                continue
-            state, action = latest
-            index = len(rows)
-            rows.append({
-                "timestamp": now - started_mono,
-                "observation.state": state,
-                "action": action,
-                "episode_index": 0,
-                "frame_index": index,
-                "index": index,
-                "task_index": 0,
-            })
-            next_sample += period
-            if next_sample < now - period:
-                next_sample = now + period
+                if message.get("type") != "state":
+                    continue
+                data = message.get("data", {})
+                try:
+                    state, action = validated_sample(data)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                args.root.mkdir(parents=True, exist_ok=False)
+                (args.root / "data" / "chunk-000").mkdir(parents=True)
+                (args.root / "meta").mkdir()
+                started_mono = time.monotonic()
+                started_unix_ns = time.time_ns()
+                break
 
+            next_sample = time.monotonic()
+            latest: tuple[list[float], list[float]] | None = (state, action) if started_mono is not None else None
+            latest_rx = time.monotonic()
+            while not stop_requested and started_mono is not None:
+                if select.select([0], [], [], 0)[0] and os.read(0, 64).lower().find(b"q") >= 0:
+                    break
+                timeout = max(0.0, min(period, next_sample - time.monotonic()))
+                try:
+                    raw = ws.recv(timeout=timeout)
+                    message = json.loads(raw)
+                    if message.get("type") == "state":
+                        data = message.get("data", {})
+                        latest = validated_sample(data)
+                        latest_rx = time.monotonic()
+                except TimeoutError:
+                    pass
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise RuntimeError(f"invalid live recording sample: {exc}") from exc
+                now = time.monotonic()
+                if now - latest_rx > .25:
+                    raise RuntimeError("state/action stream stopped; refusing to repeat stale samples")
+                if now < next_sample or latest is None:
+                    continue
+                state, action = latest
+                index = len(rows)
+                rows.append({
+                    "timestamp": now - started_mono,
+                    "observation.state": state,
+                    "action": action,
+                    "episode_index": 0,
+                    "frame_index": index,
+                    "index": index,
+                    "task_index": 0,
+                })
+                next_sample += period
+                if next_sample < now - period:
+                    next_sample = now + period
+
+    except Exception as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        print(f"Recording stopped: {failure}", flush=True)
     if not rows:
         return 2
     vector = pa.list_(pa.float32(), 16)
@@ -152,6 +176,7 @@ def main() -> int:
         "fps": args.fps,
         "task": args.task,
         "total_frames": len(rows),
+        "recording_error": failure,
         "started_unix_ns": started_unix_ns,
         "duration_s": float(rows[-1]["timestamp"]),
         "vector_order": "left_joint1..7,left_gripper,right_joint1..7,right_gripper",
@@ -159,7 +184,7 @@ def main() -> int:
     }
     (args.root / "meta" / "info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(info, ensure_ascii=False), flush=True)
-    return 0
+    return 3 if failure else 0
 
 
 if __name__ == "__main__":
