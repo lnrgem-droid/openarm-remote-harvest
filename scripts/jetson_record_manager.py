@@ -65,18 +65,13 @@ class Recorder:
         self._restore_session()
 
     def _restore_session(self) -> None:
-        """Recover an idle session after a recorder-manager restart.
-
-        The active *episode* is never resumed after a service restart, but a
-        completed-session folder remains usable so the operator can continue
-        with the next numbered episode instead of creating stray roots.
-        """
+        """Recover the batch and any episode still awaiting its operator label."""
         try:
             state = json.loads(self.session_state_path.read_text(encoding="utf-8"))
             root = Path(state["session_root"])
             if not root.is_dir() or not (root / "episodes").is_dir():
                 return
-            self._load_session(root)
+            self._load_session(root, recovery_episode=state.get("active_episode"))
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return
 
@@ -96,7 +91,7 @@ class Recorder:
             raise ValueError(f"目录不可写：{path}")
         return path
 
-    def _load_session(self, root: Path) -> None:
+    def _load_session(self, root: Path, *, recovery_episode: dict | None = None) -> None:
         root = self._safe_storage_path(root)
         manifest_path = root / "session.json"
         episodes_root = root / "episodes"
@@ -110,7 +105,40 @@ class Recorder:
         self.session_started = float(manifest.get("session_started_unix_s") or root.stat().st_mtime)
         self.session_base = root.parent
         self.last_episode = None
+        self.active_episode = None
         self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
+        pending = {}
+        if isinstance(recovery_episode, dict):
+            pending[str(recovery_episode.get("episode_root", ""))] = recovery_episode
+        for metadata in episodes_root.rglob("episode.pending.json"):
+            try:
+                value = json.loads(metadata.read_text(encoding="utf-8"))
+                previous = pending.get(str(metadata.parent), {})
+                if isinstance(value, dict) and int(value.get("pending_revision", 0)) >= int(previous.get("pending_revision", 0)):
+                    pending[str(metadata.parent)] = value
+            except (OSError, ValueError):
+                continue
+        for path, episode in sorted(pending.items()):
+            directory = Path(path).resolve()
+            if (episodes_root.resolve() not in directory.parents or not directory.is_dir()
+                    or (directory / "episode.json").exists()):
+                continue
+            try:
+                group = directory.parent.name
+                number = int(directory.name.removeprefix("episode_"))
+                if group not in self.next_episode_by_task:
+                    continue
+                episode.update(episode_root=str(directory), lerobot_root=str(directory / "lerobot"),
+                               task_group=group, episode_number=number)
+                episode.setdefault("capture_interrupted", "recorder manager restarted before episode was saved")
+                episode.setdefault("capture_ended_unix_s", episode.get("stop_requested_unix_s", time.time()))
+                self.active_episode = episode
+                self.dataset_root = str(directory / "lerobot")
+                self.phase = "awaiting_result"
+                self.stop_reason = episode.get("stop_reason") or episode["capture_interrupted"]
+                break
+            except (TypeError, ValueError):
+                continue
         for metadata in episodes_root.rglob("episode.json"):
             try:
                 episode = json.loads(metadata.read_text(encoding="utf-8"))
@@ -124,11 +152,15 @@ class Recorder:
                 continue
         for group in self.next_episode_by_task:
             for directory in (episodes_root / group).glob("episode_*"):
+                if self.active_episode and str(directory) == self.active_episode["episode_root"]:
+                    continue
                 try:
                     number = int(directory.name.removeprefix("episode_"))
                     self.next_episode_by_task[group] = max(self.next_episode_by_task[group], number + 1)
                 except ValueError:
                     continue
+        if self.active_episode:
+            self.next_episode_by_task[self.active_episode["task_group"]] = self.active_episode["episode_number"]
         # Reopening an intentionally closed batch is explicit and recoverable.
         manifest["session_ended_unix_s"] = None
         self._write_json(manifest_path, manifest)
@@ -183,7 +215,33 @@ class Recorder:
             "session_id": self.session_id, "session_root": str(self.session_root),
             "session_started_unix_s": self.session_started,
             "next_episode_by_task": self.next_episode_by_task,
+            "active_episode": self.active_episode,
         })
+
+    def _persist_pending_episode(self) -> None:
+        """Keep both local episode evidence and the runtime recovery pointer."""
+        if self.active_episode is None:
+            return
+        self.active_episode["pending_revision"] = int(self.active_episode.get("pending_revision", 0)) + 1
+        errors = []
+        try:
+            self._write_json(Path(self.active_episode["episode_root"]) / "episode.pending.json", self.active_episode)
+        except (OSError, KeyError) as exc:
+            errors.append(str(exc))
+        try:
+            self._persist_session()
+        except OSError as exc:
+            errors.append(str(exc))
+        if errors:
+            self.active_episode["metadata_error"] = "; ".join(errors)
+            self.last_log = (self.last_log + "\n待保存记录写入失败，保留本条供重试：" + "; ".join(errors))[-4000:]
+            raise OSError("; ".join(errors))
+
+    def _preserve_pending_episode(self) -> None:
+        try:
+            self._persist_pending_episode()
+        except OSError:
+            pass  # Keep the episode open in memory; never advance on a write failure.
 
     @synchronized
     def status(self) -> dict:
@@ -202,6 +260,9 @@ class Recorder:
                 self.phase = "idle" if returncode in {None, 0} or cancelled_start else "error"
         free_gb = self._free_gb()
         return {"running": running, "phase": self.phase,
+                "recording_policy": "manual_result",
+                "recording_active": process_alive and self.phase == "recording",
+                "capture_interrupted": (self.active_episode or {}).get("capture_interrupted"),
                 "stop_reason": self.stop_reason, "free_gb": round(free_gb, 1),
                 "started_unix_s": self.started, "dataset_root": self.dataset_root,
                 "last_log": self.last_log[-240:],
@@ -359,6 +420,7 @@ class Recorder:
                     self.phase = "recording"
                     if self.active_episode is not None:
                         self.active_episode["recording_started_unix_s"] = time.time()
+                        self._preserve_pending_episode()
                 return
             time.sleep(0.05)
         self._request_stop("recorder did not become ready within 30 seconds")
@@ -367,9 +429,11 @@ class Recorder:
         episode = self.active_episode
         if episode is None:
             return
-        ended = time.time()
+        ended = episode.setdefault("capture_ended_unix_s", time.time())
         requested = episode.get("requested_result")
-        result = requested if requested in {"success", "failure", "aborted"} else "aborted"
+        result = requested if requested in {"success", "failure", "aborted"} else None
+        if result is None:
+            episode.setdefault("capture_interrupted", self.stop_reason or f"recorder exited (code {returncode}) before operator saved result")
         end_health = self._camera_health()
         requested_start = float(episode["started_unix_s"])
         recording_start = float(episode.get("recording_started_unix_s", requested_start))
@@ -391,7 +455,8 @@ class Recorder:
         # sufficient: all three source streams must have frames, be healthy,
         # and report no camera-owner queue loss.  Full OpenArm validation and
         # RGB-D-to-LeRobot conversion remain an explicit offline step.
-        valid = (result == "success" and returncode == 0 and spool.get("complete") is True
+        valid = (result == "success" and not episode.get("capture_interrupted")
+                 and returncode == 0 and spool.get("complete") is True
                  and spool.get("dataset_root") == str(dataset)
                  and min(frame_values, default=0) >= 30
                  and all(int(spool_drop.get(role, 0)) == 0 for role in ("left_wrist", "right_wrist", "chest")))
@@ -412,13 +477,27 @@ class Recorder:
         })
         if result == "failure" and not episode.get("failure_code"):
             episode["failure_code"] = "unspecified_failure"
+        if result is None:
+            self.phase = "awaiting_result"
+            self._preserve_pending_episode()
+            return
+        episode["finalized_unix_s"] = time.time()
+        episode.pop("metadata_error", None)
         self._write_json(Path(episode["episode_root"]) / "episode.json", episode)
         self.last_episode = dict(episode)
         self.active_episode = None
         group = str(episode.get("task_group") or self._task_group(str(episode.get("task", ""))))
-        self.next_episode_by_task[group] += 1
-        self._write_session_manifest()
-        self._persist_session()
+        number = int(episode.get("episode_number") or episode["episode_id"].rsplit("_", 1)[-1])
+        self.next_episode_by_task[group] = max(self.next_episode_by_task[group], number + 1)
+        self.phase = "idle" if returncode in {None, 0} else "error"
+        # episode.json is the durable commit. A stale pending file or session
+        # summary must never resurrect or save this same episode twice.
+        try:
+            (Path(episode["episode_root"]) / "episode.pending.json").unlink(missing_ok=True)
+            self._write_session_manifest()
+            self._persist_session()
+        except OSError as exc:
+            self.last_log = (self.last_log + f"\n本条已保存；批次摘要更新失败，可从 episode.json 恢复：{exc}")[-4000:]
         self._release_motion_lock()
 
     def _motion_request(self, command, **fields):
@@ -447,6 +526,11 @@ class Recorder:
             with self._lock:
                 self.active_marker.unlink(missing_ok=True)
                 self.phase = "stopping"
+                if self.active_episode is not None:
+                    self.active_episode.setdefault("capture_ended_unix_s", time.time())
+                    if not self.active_episode.get("requested_result"):
+                        self.active_episode.setdefault("capture_interrupted", self.stop_reason or f"recorder exited (code {returncode}) before operator saved result")
+                    self._preserve_pending_episode()
                 dataset = Path(self.dataset_root) if self.dataset_root else None
             deadline = time.monotonic() + 12.0
             while (dataset and (dataset / "depth_raw").exists()
@@ -455,15 +539,15 @@ class Recorder:
             with self._lock:
                 if generation != self._generation:
                     return
-                cancelled_start = bool(self.stop_reason and self.stop_reason.endswith(" during startup"))
                 try:
                     self._finalize_episode(returncode)
-                    self.phase = "idle" if returncode == 0 or cancelled_start else "error"
                 except Exception as exc:
                     self.last_log += f"\n封装元数据失败，保留文件供恢复：{exc}"
-                    self.phase = "error"
+                    self.phase = "awaiting_result"
+                    if self.active_episode is not None:
+                        self.active_episode["metadata_error"] = str(exc)
+                        self._preserve_pending_episode()
                 finally:
-                    self.active_episode = None
                     self._finalizing = False
                     self._release_motion_lock()
 
@@ -497,6 +581,14 @@ class Recorder:
     @synchronized
     def _request_stop(self, reason: str) -> bool:
         process = self.process
+        first_request = not self._stop_requested.is_set()
+        if first_request:
+            self.stop_reason = f"{reason} during startup" if self.phase == "starting" else reason
+            if self.active_episode is not None:
+                self.active_episode.setdefault("stop_requested_unix_s", time.time())
+                if not self.active_episode.get("requested_result"):
+                    self.active_episode.setdefault("capture_interrupted", self.stop_reason)
+                self._preserve_pending_episode()
         if process is None or process.poll() is not None:
             self.active_marker.unlink(missing_ok=True)
             return False
@@ -504,12 +596,10 @@ class Recorder:
             was_starting = self.phase == "starting"
             if self.active_episode is not None and "stop_requested_unix_s" not in self.active_episode:
                 self.active_episode["stop_requested_unix_s"] = time.time()
-        first_request = not self._stop_requested.is_set()
         self._stop_requested.set()
         self.active_marker.unlink(missing_ok=True)
         with self._lock:
             self.phase = "stopping"
-            self.stop_reason = f"{reason} during startup" if was_starting else reason
         if first_request and was_starting:
             # LeRobot initializes its keyboard handler late and flushes input;
             # a q sent during STARTING can therefore be lost.  There is no
@@ -569,7 +659,7 @@ class Recorder:
 
     @synchronized
     def start(self, *, dataset_root: str | None = None, task: str | None = None) -> dict:
-        if (self.process is not None and self.process.poll() is None) or getattr(self, "_finalizing", False):
+        if (self.process is not None and self.process.poll() is None) or getattr(self, "_finalizing", False) or self.phase == "awaiting_result":
             return {"ok": False, "error": "recording is already running", **self.status()}
         free_gb = self._free_gb()
         if free_gb < 20.0:
@@ -728,21 +818,23 @@ class Recorder:
             "collection_motion_at_start": motion.get("collection") if motion else None,
         }
         try:
+            self._persist_pending_episode()
             response = self.start(dataset_root=str(dataset_root), task=task)
         except Exception as exc:
             self._release_motion_lock()
-            self.phase = "error"
-            self.active_episode.update(result="aborted", valid=False, failure_code="recorder_start_failed", error=str(exc))
-            try:
-                self._write_json(episode_root / "episode.json", self.active_episode)
-            finally:
-                self.active_episode = None
-            raise
+            self.phase = "awaiting_result"
+            self.active_episode.update(capture_interrupted=f"recorder start failed: {exc}",
+                                       failure_code="recorder_start_failed", error=str(exc),
+                                       capture_ended_unix_s=time.time())
+            self._preserve_pending_episode()
+            return {"ok": False, "error": f"recorder start failed: {exc}", **self.status()}
         if not response.get("ok"):
             self._release_motion_lock()
-            self.active_episode = None
-            try: episode_root.rmdir()
-            except OSError: pass
+            self.phase = "awaiting_result"
+            self.active_episode.update(capture_interrupted=str(response.get("error", "recorder did not start")),
+                                       capture_ended_unix_s=time.time())
+            self._preserve_pending_episode()
+            response = {**response, **self.status()}
         return response
 
     @synchronized
@@ -750,13 +842,27 @@ class Recorder:
         if result not in {"success", "failure", "aborted"}:
             return {"ok": False, "error": "result must be success, failure, or aborted", **self.status()}
         if self.active_episode is None:
+            if self.last_episode is not None:
+                return {"ok": True, "message": "episode already finalized; duplicate ignored", **self.status()}
             return {"ok": False, "error": "no active episode", **self.status()}
-        if self.phase == "stopping":
+        if self.phase == "stopping" and self.active_episode.get("requested_result"):
             return {"ok": True, "message": "already stopping; duplicate ignored", **self.status()}
-        if result in {"success", "failure"} and self.phase != "recording":
+        if result in {"success", "failure"} and self.phase not in {"recording", "stopping", "awaiting_result"}:
             return {"ok": False, "error": "episode is still starting; wait for recording phase", **self.status()}
-        self.active_episode["requested_result"] = result
-        self.active_episode["failure_code"] = failure_code.strip() or None
+        # The first operator label is authoritative, including a retry after a
+        # failed metadata write. Capture interruption remains a separate fact.
+        if not self.active_episode.get("requested_result"):
+            self.active_episode["requested_result"] = result
+            self.active_episode["failure_code"] = failure_code.strip() or self.active_episode.get("failure_code")
+        self._preserve_pending_episode()
+        if self.phase == "awaiting_result":
+            try:
+                self._finalize_episode(self.active_episode.get("recorder_returncode"))
+            except Exception as exc:
+                self.active_episode["metadata_error"] = str(exc)
+                self._preserve_pending_episode()
+                return {"ok": False, "error": f"episode save failed; retry result: {exc}", **self.status()}
+            return {"ok": True, "message": "episode saved", **self.status()}
         return self.stop()
 
     @synchronized
@@ -777,6 +883,8 @@ class Recorder:
     def stop(self) -> dict:
         if not self.status()["running"]:
             return {"ok": False, "error": "recording is not running", **self.status()}
+        if self.phase == "awaiting_result":
+            return {"ok": True, "message": "capture stopped; awaiting operator result", **self.status()}
         first_request = not self._stop_requested.is_set()
         self._request_stop("operator requested stop")
         message = "stop requested; finalizing" if first_request else "already stopping; duplicate ignored"

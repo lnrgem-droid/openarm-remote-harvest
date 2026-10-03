@@ -343,7 +343,7 @@ def main() -> None:
                         "rgbd_fps": round((camera.count - report_counts[camera.spec.role]) / elapsed, 1),
                         "age_ms": None if age_ms is None else round(age_ms, 1),
                         "pair_us": None if header is None else header["rgb_depth_pair_delta_us"],
-                        "drop": camera.dropped, "healthy": age_ms is not None and age_ms <= 100,
+                        "drop": camera.dropped, "healthy": age_ms is not None and age_ms <= 200,
                         "error": camera.last_error,
                     }
                     report_counts[camera.spec.role] = camera.count

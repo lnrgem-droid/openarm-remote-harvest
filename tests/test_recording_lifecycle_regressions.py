@@ -61,15 +61,180 @@ class LifecycleTest(unittest.TestCase):
         self.assertFalse(self.r.start_session("new")["ok"])
         self.assertFalse(self.r.close_session()["ok"])
 
-    def test_spawn_failure_does_not_permanently_block_future_episodes(self):
-        with self.assertRaises(FileNotFoundError):
-            self.r.start_episode("LEFT_GRASP_LOG")
-        self.assertIsNone(self.r.active_episode)
+    def test_spawn_failure_waits_for_operator_before_advancing(self):
+        response = self.r.start_episode("LEFT_GRASP_LOG")
+        self.assertFalse(response["ok"])
+        self.assertEqual(self.r.phase, "awaiting_result")
+        self.assertEqual(self.r.next_episode_by_task["left"], 1)
         self.assertIsNone(self.r.motion_token)
-        self.assertFalse(self.r.status()["running"])
-        saved = list(self.r.session_root.rglob("episode.json"))
-        self.assertEqual(json.loads(saved[0].read_text())["failure_code"], "recorder_start_failed")
+        self.assertFalse(self.r.status()["recording_active"])
+        self.assertTrue(self.r.stop_episode("failure")["ok"])
+        self.assertEqual(self.r.last_episode["failure_code"], "recorder_start_failed")
+        self.assertEqual(self.r.next_episode_by_task["left"], 2)
         self.assertTrue(self.r.start_session("new")["ok"])
+
+    def exited(self, returncode=0):
+        process = types.SimpleNamespace(poll=lambda: returncode, wait=lambda: returncode, returncode=returncode)
+        self.r.process = process
+        self.r.phase = "recording"
+        self.r._finalizing = True
+        self.r._clear_marker_when_recording_exits(process, self.r._generation)
+
+    def receipt(self, path):
+        dataset = path / "lerobot"
+        dataset.mkdir(exist_ok=True)
+        (dataset / "rgbd-complete.json").write_text(json.dumps({"dataset_root": str(dataset),
+            "complete": True, "written": dict.fromkeys(camera_roles, 90), "dropped": {}}))
+
+    def test_unrequested_exit_preserves_number_and_data_until_operator_saves(self):
+        path = self.active(result=None)
+        self.receipt(path)
+        self.exited()
+        state = self.r.status()
+        self.assertEqual(state["phase"], "awaiting_result")
+        self.assertTrue(state["running"])
+        self.assertFalse(state["recording_active"])
+        self.assertIn("recorder exited", state["capture_interrupted"])
+        self.assertEqual(state["next_episode_by_task"]["right"], 1)
+        self.assertTrue((path / "episode.pending.json").exists())
+        self.assertFalse((path / "episode.json").exists())
+        self.assertFalse(self.r.start_episode("LEFT_GRASP_LOG")["ok"])
+        self.assertFalse(self.r.start_session("new")["ok"])
+        self.assertFalse(self.r.close_session()["ok"])
+        self.assertTrue(self.r.stop_episode("success")["ok"])
+        saved = json.loads((path / "episode.json").read_text())
+        self.assertEqual(saved["result"], "success")
+        self.assertFalse(saved["valid"])
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+        self.assertFalse((path / "episode.pending.json").exists())
+        self.assertTrue(self.r.stop_episode("failure")["ok"])
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+        self.assertEqual(json.loads((path / "episode.json").read_text()), saved)
+
+    def test_clean_operator_result_still_saves_once_and_can_be_valid(self):
+        path = self.active("success")
+        self.receipt(path)
+        self.exited()
+        self.assertIsNone(self.r.active_episode)
+        self.assertTrue(self.r.last_episode["valid"])
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+        self.r._finalize_episode(0)
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+
+    def test_failure_and_explicit_abort_can_close_interrupted_capture(self):
+        for result in ("failure", "aborted"):
+            with self.subTest(result=result):
+                self.r.start_session("new")
+                self.active(None)
+                self.exited(3)
+                response = self.r.stop_episode(result, "operator_choice")
+                self.assertTrue(response["ok"])
+                self.assertEqual(self.r.last_episode["result"], result)
+                self.assertEqual(self.r.next_episode_by_task["right"], 2)
+
+    def test_result_during_capture_cleanup_is_accepted_once(self):
+        self.active(None)
+        self.r.active_episode["capture_interrupted"] = "camera disconnected"
+        self.r.phase = "stopping"
+        self.r._finalizing = True
+        self.assertTrue(self.r.stop_episode("failure")["ok"])
+        self.assertEqual(self.r.active_episode["requested_result"], "failure")
+        self.assertTrue(self.r.stop_episode("success")["ok"])
+        self.assertEqual(self.r.active_episode["requested_result"], "failure")
+        self.r._finalize_episode(0)
+        self.assertEqual(self.r.last_episode["result"], "failure")
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+
+    def test_episode_save_failure_retains_result_and_number_for_retry(self):
+        path = self.active(None)
+        self.exited()
+        original = self.r._write_json
+        def fail_episode(target, value):
+            if target.name == "episode.json":
+                raise OSError("disk write failed")
+            return original(target, value)
+        with patch.object(self.r, "_write_json", side_effect=fail_episode):
+            response = self.r.stop_episode("failure")
+        self.assertFalse(response["ok"])
+        self.assertEqual(self.r.phase, "awaiting_result")
+        self.assertEqual(self.r.next_episode_by_task["right"], 1)
+        self.assertIsNotNone(self.r.active_episode)
+        self.assertFalse((path / "episode.json").exists())
+        self.assertTrue(self.r.stop_episode("success")["ok"])
+        self.assertEqual(self.r.last_episode["result"], "failure")
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+
+    def test_pending_episode_survives_restart_without_advancing(self):
+        path = self.active(None)
+        self.exited(3)
+        restored = manager.Recorder(self.root, runtime_dir=self.root / "runtime", storage_root=self.root)
+        self.assertEqual(restored.phase, "awaiting_result")
+        self.assertEqual(restored.next_episode_by_task["right"], 1)
+        self.assertEqual(restored.active_episode["episode_root"], str(path))
+        self.assertEqual(restored.active_episode["recorder_returncode"], 3)
+        restored._camera_health = lambda: {"ok": True}
+        restored.active_marker = self.root / "restored-marker"
+        self.assertTrue(restored.stop_episode("failure")["ok"])
+        self.assertEqual(restored.next_episode_by_task["right"], 2)
+
+    def test_committed_episode_remains_successful_when_batch_summary_write_fails(self):
+        path = self.active(None)
+        self.exited()
+        with patch.object(self.r, "_persist_session", side_effect=OSError("runtime disk unavailable")):
+            response = self.r.stop_episode("failure")
+        self.assertTrue(response["ok"])
+        self.assertIsNone(self.r.active_episode)
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+        self.assertTrue((path / "episode.json").exists())
+        self.assertIn("本条已保存", self.r.last_log)
+        self.assertTrue(self.r.stop_episode("failure")["ok"])
+        self.assertEqual(self.r.next_episode_by_task["right"], 2)
+
+    def test_automatic_safety_stop_keeps_first_reason_and_waits_for_result(self):
+        self.active(None)
+        self.r.process = types.SimpleNamespace(poll=lambda: None)
+        self.r.phase = "recording"
+        self.assertTrue(self.r._request_stop("automatic stop: only 9.0 GB free"))
+        self.r._request_stop("automatic stop: RGB-D camera health lost")
+        self.assertIn("9.0 GB", self.r.stop_reason)
+        self.assertIn("9.0 GB", self.r.active_episode["capture_interrupted"])
+        self.assertIsNone(self.r.active_episode["requested_result"])
+        self.exited()
+        self.assertEqual(self.r.phase, "awaiting_result")
+        self.assertEqual(self.r.next_episode_by_task["right"], 1)
+
+    def test_runtime_pointer_recovers_pending_when_episode_metadata_write_failed(self):
+        path = self.active(None)
+        self.exited()
+        (path / "episode.pending.json").unlink()
+        restored = manager.Recorder(self.root, runtime_dir=self.root / "runtime", storage_root=self.root)
+        self.assertEqual(restored.phase, "awaiting_result")
+        self.assertEqual(restored.next_episode_by_task["right"], 1)
+        self.assertEqual(restored.active_episode["episode_root"], str(path))
+
+    def test_restart_prefers_latest_operator_choice_over_stale_episode_snapshot(self):
+        path = self.active(None)
+        self.exited()
+        older_snapshot = (path / "episode.pending.json").read_text()
+        self.r.active_episode["requested_result"] = "failure"
+        self.r._persist_pending_episode()
+        (path / "episode.pending.json").write_text(older_snapshot)
+        restored = manager.Recorder(self.root, runtime_dir=self.root / "runtime", storage_root=self.root)
+        self.assertEqual(restored.phase, "awaiting_result")
+        self.assertEqual(restored.active_episode["requested_result"], "failure")
+        self.assertEqual(restored.next_episode_by_task["right"], 1)
+
+    def test_committed_episode_does_not_reopen_from_stale_pending_metadata(self):
+        path = self.active(None)
+        self.exited()
+        pending = (path / "episode.pending.json").read_text()
+        stale_runtime = self.r.session_state_path.read_text()
+        self.r.stop_episode("failure")
+        (path / "episode.pending.json").write_text(pending)
+        self.r.session_state_path.write_text(stale_runtime)
+        restored = manager.Recorder(self.root, runtime_dir=self.root / "runtime", storage_root=self.root)
+        self.assertIsNone(restored.active_episode)
+        self.assertEqual(restored.next_episode_by_task["right"], 2)
 
     def test_previous_episode_global_statistics_do_not_prove_current_validity(self):
         self.active(); self.r._finalize_episode(0)

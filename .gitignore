@@ -58,3 +58,6 @@ secrets.json
 .DS_Store
 Thumbs.db
 ros2_arms/.git.bak_ros2_arms_remote/
+
+# Local hardware traces, installation backups and capture diagnostics
+/validation/
