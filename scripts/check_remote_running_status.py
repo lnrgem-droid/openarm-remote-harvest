@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -55,12 +56,42 @@ def is_healthy_running(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-tracking-error-rad", type=float)
+    parser.add_argument("--startup-report", help="require successful acceptance for this leader session")
+    parser.add_argument("--health-report", help="require fresh session-matched physical motor readiness")
+    parser.add_argument("--explain", action="store_true", help="print the actual rejected gates")
     args = parser.parse_args()
+    issues = []
     try:
         status = parse_status(sys.stdin.read())
-        return 0 if is_healthy_running(status, args.max_tracking_error_rad) else 1
-    except (TypeError, ValueError):
-        return 1
+        if args.health_report:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from teleop_readiness import apply_current_report
+            checked = apply_current_report(status, args.health_report)
+            if not checked.get('teleop_ready'):
+                issues.append('电机健康检查 [' + str(checked.get('state')) + ']：' +
+                              checked.get('readiness_reason', '未知原因') +
+                              '；证据：' + args.health_report)
+        if args.startup_report:
+            try:
+                report = json.loads(Path(args.startup_report).read_text())
+                if not (
+                    report.get("accepted") is True
+                    and report.get("phase") == "following"
+                    and report.get("leader_session_id") == status.get("leader_session_id")
+                ):
+                    issues.append('启动对齐验收未通过或不属于当前主臂会话：' + args.startup_report)
+            except (OSError, ValueError, AttributeError) as exc:
+                issues.append('无法读取启动对齐验收：' + str(exc))
+        if not is_healthy_running(status, args.max_tracking_error_rad):
+            issues.append('控制状态/会话/跟踪误差未通过：state=' + str(status.get('state')) +
+                          '，fault_bits=' + str(status.get('fault_bits')) +
+                          '，reason=' + str(status.get('reason', '')))
+    except (OSError, TypeError, ValueError, AttributeError) as exc:
+        issues.append('无法验证控制状态：' + str(exc))
+    if args.explain:
+        for issue in issues:
+            print('  - ' + issue, file=sys.stderr)
+    return 1 if issues else 0
 
 
 if __name__ == "__main__":

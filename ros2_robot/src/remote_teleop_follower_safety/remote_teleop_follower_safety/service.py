@@ -7,6 +7,7 @@ validated, it deliberately refuses the READY -> RUNNING transition.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import signal
@@ -21,7 +22,14 @@ from .state_machine import SafetyReaction, SafetyStateMachine, TransitionError
 from .watchdog import WatchdogConfig, WatchdogSupervisor
 
 
-def _snapshot_json(supervisor: WatchdogSupervisor) -> str:
+WATCHDOG_IO_PROTOCOL_VERSION = 1
+
+
+def _snapshot_json(supervisor: WatchdogSupervisor, *, reply_to: dict | None = None) -> str:
+    # A reply is safety authority. Never acknowledge RUNNING before evaluating
+    # the current heartbeat/action ages, including request_run and status.
+    now_ns = time.monotonic_ns()
+    supervisor.check(now_ns)
     snapshot = supervisor.machine.snapshot()
     return json.dumps(
         {
@@ -33,10 +41,60 @@ def _snapshot_json(supervisor: WatchdogSupervisor) -> str:
             "reaction": snapshot.reaction.value,
             "reaction_verified": snapshot.reaction_verified,
             "hardware_action": "REPORT_ONLY_NO_CAN",
+            "watchdog_io_protocol_version": WATCHDOG_IO_PROTOCOL_VERSION,
+            "watchdog_session_id": supervisor.watchdog_session_id,
+            "snapshot_monotonic_ns": now_ns,
+            "reply_to": reply_to,
+            "diagnostics": supervisor.diagnostics(now_ns),
+            "first_fault": supervisor.first_fault,
         },
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _handle_datagram(supervisor: WatchdogSupervisor, datagram: bytes) -> str:
+    """Apply this request before checking and serializing its correlated reply."""
+    reply_to = None
+    try:
+        kind, message = decode_local(datagram)
+        now_ns = time.monotonic_ns()
+        machine = supervisor.machine
+        if kind == "heartbeat":
+            reply_to = {"type": "heartbeat", "controller_session_id": message.controller_session_id,
+                        "sequence": message.sequence, "sent_monotonic_ns": message.sent_monotonic_ns}
+            supervisor.receive_heartbeat(message, now_ns)
+        else:
+            command = message["command"]
+            reply_to = {"type": "command", "command": command}
+            if command == "alignment_complete":
+                machine.alignment_complete(int(message["leader_session_id"]))
+            elif command == "request_run":
+                machine.request_run(int(message["leader_session_id"]))
+            elif command == "hold":
+                machine.request_hold()
+            elif command == "reset":
+                supervisor.reset_fault(now_ns, estop_released=message["estop_released"])
+            elif command == "estop":
+                supervisor.trip(FaultBits.E_STOP_ACTIVE, "local E-stop command", now_ns)
+            elif command == "status":
+                pass
+    except (LocalProtocolError, TransitionError, KeyError, TypeError, ValueError) as exc:
+        supervisor.trip(FaultBits.INVALID_COMMAND, f"local watchdog input rejected: {exc}", time.monotonic_ns())
+    return _snapshot_json(supervisor, reply_to=reply_to)
+
+
+def _send_reply(sock: socket.socket, payload: str, peer) -> bool:
+    """An expired one-shot client cannot block or terminate supervision."""
+    if not peer:
+        return False
+    try:
+        sock.sendto(payload.encode("utf-8"), socket.MSG_DONTWAIT, peer)
+        return True
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ECONNREFUSED, errno.EAGAIN, errno.EWOULDBLOCK}:
+            return False
+        raise
 
 
 def _existing_watchdog_is_live(socket_path: str) -> bool:
@@ -136,34 +194,9 @@ def main() -> None:
         while not stopping and (deadline is None or time.monotonic() < deadline):
             try:
                 datagram, peer = sock.recvfrom(4096)
-                kind, message = decode_local(datagram)
-                now_ns = time.monotonic_ns()
-                if kind == "heartbeat":
-                    supervisor.receive_heartbeat(message, now_ns)
-                else:
-                    command = message["command"]
-                    if command == "alignment_complete":
-                        machine.alignment_complete(int(message["leader_session_id"]))
-                    elif command == "request_run":
-                        machine.request_run(int(message["leader_session_id"]))
-                    elif command == "hold":
-                        machine.request_hold()
-                    elif command == "reset":
-                        supervisor.reset_fault(
-                            now_ns, estop_released=message["estop_released"]
-                        )
-                    elif command == "estop":
-                        machine.trip(FaultBits.E_STOP_ACTIVE, "local E-stop command")
-                    elif command == "status":
-                        pass
-                if peer:
-                    sock.sendto(_snapshot_json(supervisor).encode("utf-8"), peer)
+                _send_reply(sock, _handle_datagram(supervisor, datagram), peer)
             except socket.timeout:
                 pass
-            except (LocalProtocolError, TransitionError, KeyError, TypeError, ValueError) as exc:
-                machine.trip(FaultBits.INVALID_COMMAND, f"local watchdog input rejected: {exc}")
-                if "peer" in locals() and peer:
-                    sock.sendto(_snapshot_json(supervisor).encode("utf-8"), peer)
             supervisor.check(time.monotonic_ns())
             current = machine.snapshot()
             if current != previous:

@@ -1,5 +1,7 @@
 # OpenArm 双臂蘑菇采摘项目
 
+最新更新见 [2026-10-04 遥操与采集修复](docs/UPDATE_20261004.md)，包含主臂自动对齐、手动保存录制及录制负载下的通信超时修复。
+
 这是 OpenArm 双臂蘑菇采摘项目的源码与开发记录仓库。`main` 保留原始单机基线；`dev/remote-teleop-v1` 已冻结当前可实测的**主机（主臂）+ Jetson（从臂）双机双臂遥操作版本**，并作为后续三路 RGB-D 回传开发的固定起点。
 
 > 该版本完成了低延迟关节/夹爪遥操、重力补偿、受控归零、从端本地看门狗、相对位姿对齐和有限虚拟双边力反馈。它不是经过生产安全认证的系统；真机必须遵守本文的急停、现场托举和停止流程。
@@ -39,7 +41,10 @@
 - 原始单机双边遥操作 CAN 映射：右从臂 `can0`、左从臂 `can1`、右主臂 `can2`、左主臂 `can3`
 - 当前双机遥操映射：主机主臂右 `can0`、左 `can1`；Jetson 从臂右 `can1`、左 `can2`
 - 当前双机遥操：UDP 动作/状态链路 250 Hz、Jetson 本地控制环 500 Hz、主从 ROS 图隔离（仅 UDP 跨机器）
-- 一键启动：`scripts/run_bimanual_remote_feedback.sh`；启动会受控回到既有编码 `q=0`，经对齐门槛后才请求 `RUNNING`
+- 一键启动：`scripts/run_bimanual_remote_feedback.sh`；受控回到既有初始位（J4=π/5，其余关节=0，不修改编码器零点），完成自动对齐与正常跟随模式复测后才宣布可遥操。详见[全自动启动验收](docs/AUTOMATIC_STARTUP_ALIGNMENT.md)。
+- 2026-09-20归位纠偏：增加受限纠偏、超时锁存和启动前动态库检查。独立 `install_tracking_candidate` 构建已做真实归位、对齐和右主从保存位回位测试，范围与限制见[真机验收记录](docs/TRACKING_HARDWARE_ACCEPTANCE_20260920.md)。
+- 夹爪闭合阻力：当前核心入口选择包含上述纠偏的 `install_gripper_candidate`，从夹爪实际开度回传主机、本地受限弹簧提供闭合阻力；七关节反馈不变。已完成软件测试和真实启动，实物手感待操作者确认，详见[夹爪反馈说明](docs/GRIPPER_CONTACT_FEEDBACK_20260920.md)。两套旧构建保留。
+- 现场断连恢复：识别Jetson重启造成的主机残留会话，经“恢复”确认及二次检查后重建；网线重连不自动解除故障或恢复运动。详见[断连与重新上电说明](docs/DISCONNECT_RECOVERY_20260920.md)。
 - `openarm_bringup`、`openarm_gravity_pd_control` 和直接占用相同 CAN 的遥操作程序不能同时运行
 - 2026-08-26 已从 Git bundle 全新恢复并完成双臂真机主从遥操作；左右夹爪均被识别并进入控制线程，实际开合尚未单独记录验证
 

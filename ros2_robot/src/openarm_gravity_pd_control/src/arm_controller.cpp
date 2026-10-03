@@ -7,6 +7,8 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 #include "openarm_gravity_pd_control/arm_controller.hpp"
+#include "openarm_gravity_pd_control/collection_tracking_guard.hpp"
+#include "openarm_gravity_pd_control/tracking_assist.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -123,6 +125,7 @@ ArmController::ArmController(const std::string & can_interface,
 : can_interface_(can_interface), params_(params),
   logger_(logger.get_child(can_interface))
 {
+  validateVelocityFeedbackScale(params_.velocity_feedback_scale, "velocity_feedback_scale");
   dynamics_ = std::make_unique<ArmDynamics>(urdf_path, root_link, tip_link);
   target_positions_.resize(ARM_DOF, 0.0);
   interp_from_.resize(ARM_DOF, 0.0);
@@ -137,6 +140,10 @@ ArmController::ArmController(const std::string & can_interface,
   auto limits = loadJointLimits(joint_limits_path, side);
   pos_min_ = limits.first;
   pos_max_ = limits.second;
+  // Both ArmController objects are constructed before either arm is enabled.
+  // Fail here, not from a homing thread after its peer has started moving.
+  use_drive_feedback_guard_ = params_.tracking_assist_enabled || params_.startup_tracking_assist_enabled || params_.gripper_contact_feedback;
+  if (use_drive_feedback_guard_) drive_feedback_guard_.open(can_interface_);
 }
 
 ArmController::~ArmController()
@@ -148,8 +155,9 @@ ArmController::~ArmController()
 }
 
 // ── Initialization ────────────────────────────────────────────────────────────
-bool ArmController::init()
+bool ArmController::init(const std::function<bool()> & keep_running)
 {
+  if (!keep_running()) return false;
   if (!dynamics_->init()) {
     std::cerr << "[ArmController][" << can_interface_ << "] Dynamics init failed." << std::endl;
     return false;
@@ -157,16 +165,20 @@ bool ArmController::init()
 
   std::cout << "[ArmController][" << can_interface_ << "] Initializing motors..." << std::endl;
 
+
   openarm_ = new openarm::can::socket::OpenArm(can_interface_, /*enable_fd=*/true);
   openarm_->init_arm_motors(ARM_MOTOR_TYPES, ARM_SEND_IDS, ARM_RECV_IDS);
   openarm_->init_gripper_motor(GRIPPER_TYPE, GRIPPER_SEND_ID, GRIPPER_RECV_ID);
   openarm_->set_callback_mode_all(openarm::damiao_motor::CallbackMode::STATE);
+  if (!keep_running()) return false;
   openarm_->enable_all();
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (!keep_running()) return false;
   openarm_->refresh_all();
   openarm_->recv_all();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (!keep_running()) return false;
 
   initialized_ = true;
   // Remote mode must never move merely because the process started.  The first
@@ -192,7 +204,8 @@ bool ArmController::init()
     homeToZeroInterpolated(
       params_.startup_home_duration_s,
       params_.startup_home_timeout_s,
-      params_.startup_home_tolerance_rad);
+      params_.startup_home_tolerance_rad, keep_running);
+    if (!keep_running()) return false;
     // Homing finishes before the remote watchdog can acknowledge ALIGN/RUN.
     // Keep the exact home target under the same startup gains across that
     // distributed handshake; the launcher explicitly releases this hold only
@@ -223,6 +236,8 @@ void ArmController::setTargetJointState(const sensor_msgs::msg::JointState::Shar
   std::lock_guard<std::mutex> lock(target_mutex_);
 
   auto now = std::chrono::steady_clock::now();
+  if (!std::all_of(msg->position.begin(), msg->position.end(), [](double x) {return std::isfinite(x);})) return;
+  target_received_ = now;
   recv_count_++;
 
   // log_interval_s <= 0：默认不打印，避免周期性 INFO 挤占控制线程。
@@ -262,12 +277,16 @@ void ArmController::setTargetJointState(const sensor_msgs::msg::JointState::Shar
   new_target_pending_ = new_target_pending_ || target_changed;
 }
 
-void ArmController::setForceFeedback(const std::vector<double> & torque)
+void ArmController::setForceFeedback(const std::vector<double> & torque,
+                                    const std::vector<double> & remote_gripper)
 {
   if (torque.size() < ARM_DOF) {
     return;
   }
   std::lock_guard<std::mutex> lock(force_feedback_mutex_);
+  remote_gripper_valid_ = remote_gripper.size()==1 && std::isfinite(remote_gripper[0]) &&
+    remote_gripper[0]>=params_.gripper_max_rad && remote_gripper[0]<=0.;
+  if (remote_gripper_valid_) remote_gripper_q_=remote_gripper[0];
   for (size_t i = 0; i < ARM_DOF; ++i) {
     force_feedback_target_[i] = std::isfinite(torque[i]) ? torque[i] : 0.0;
   }
@@ -317,7 +336,8 @@ void ArmController::feedbackOnlyStep()
   JointStateSnapshot snapshot;
   for (size_t i = 0; i < std::min(motors.size(), ARM_DOF); ++i) {
     snapshot.position.push_back(motors[i].get_position());
-    snapshot.velocity.push_back(motors[i].get_velocity());
+    snapshot.velocity.push_back(calibratedFeedbackVelocity(
+      motors[i].get_velocity(), params_.velocity_feedback_scale, i));
     snapshot.effort.push_back(motors[i].get_torque());
   }
   const auto & gripper = openarm_->get_gripper().get_motors();
@@ -347,7 +367,8 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   std::vector<double> q_act(n), dq_act(n), tau_act(n);
   for (size_t i = 0; i < n; ++i) {
     q_act[i]  = arm_motors[i].get_position();
-    dq_act[i] = arm_motors[i].get_velocity();
+    dq_act[i] = calibratedFeedbackVelocity(
+      arm_motors[i].get_velocity(), params_.velocity_feedback_scale, i);
     tau_act[i] = arm_motors[i].get_torque();
   }
 
@@ -373,9 +394,11 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   }
 
   const auto now = std::chrono::steady_clock::now();
+  const bool drive_feedback_ok = !use_drive_feedback_guard_ || drive_feedback_guard_.poll();
   std::vector<double> collection_pose;
   double collection_grip_target = 0.0;
   bool collection_servo = false;
+  bool collection_faulted = false;
   {
     std::lock_guard<std::mutex> lock(collection_mutex_);
     if (collection_active_ && !direct_target) {
@@ -385,10 +408,10 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
         collection_gripper_ = gripper_position / GRIPPER_OPEN_M * params_.gripper_max_rad;
         collection_initialized_ = true;
       }
-      bool failed = std::chrono::duration<double>(now-collection_time_).count() > 0.1;
-      for (size_t i = 0; i < n; ++i) {
-        failed = failed || std::abs(collection_target_[i]-q_act[i]) > 0.20;
-      }
+      const bool failed = collectionTrackingFailed(
+        collection_target_, q_act,
+        gripper_position / GRIPPER_OPEN_M * params_.gripper_max_rad,
+        std::chrono::duration<double>(now-collection_time_).count());
       if (failed && !collection_fault_) {
         collection_fault_ = true;
         collection_target_ = q_act;
@@ -401,6 +424,7 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       collection_grip_target = collection_target_[7];
       direct_target = &collection_pose;
       collection_mode_.store(collection_fault_ ? 2 : 1);
+      collection_faulted = collection_fault_;
     } else {
       collection_initialized_ = false;
       collection_mode_.store(0);
@@ -457,9 +481,8 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   }
 
   for (size_t i = 0; i < n; ++i) {
-    const double max_step = (collection_servo ? 0.15 : params_.max_joint_vel[i]) * dt;
-    const double error = q_des[i] - command_positions_[i];
-    command_positions_[i] += std::clamp(error, -max_step, max_step);
+    command_positions_[i] = rateLimitedPosition(command_positions_[i], q_des[i],
+      collection_servo ? kCollectionReturnMaxVelocity : params_.max_joint_vel[i], dt);
   }
 
   std::vector<double> tau_grav(n, 0.0);
@@ -494,6 +517,20 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
   std::vector<openarm::damiao_motor::MITParam> arm_cmds;
   arm_cmds.reserve(n);
   std::vector<double> interaction_effort(n, 0.0);
+  bool command_fresh = false;
+  {
+    std::lock_guard<std::mutex> lock(target_mutex_);
+    command_fresh = target_received_.time_since_epoch().count() != 0 &&
+      now-target_received_ < std::chrono::milliseconds(100);
+  }
+  // Saved-pose return uses the same bounded correction as startup, only while
+  // its servo is healthy. Normal leader FOLLOW remains gravity/haptics only.
+  // A latched return fault must never retain this extra restoring torque.
+  const bool assist_permitted = drive_feedback_ok && !startup_home_failed_.load() &&
+    (collection_servo ? collectionReturnAssistAllowed(drive_feedback_ok,
+       collection_faulted, params_.startup_tracking_assist_enabled) :
+     (direct_target ? params_.startup_tracking_assist_enabled :
+      (params_.tracking_assist_enabled && command_fresh && !params_.bilateral_position_feedback_enabled)));
   for (size_t i = 0; i < n; ++i) {
     const auto & active_kp = direct_target ? params_.startup_home_kp :
       (params_.bilateral_position_feedback_enabled ? params_.bilateral_kp : params_.kp);
@@ -501,13 +538,16 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       (params_.bilateral_position_feedback_enabled ? params_.bilateral_kd : params_.kd);
     const double kp = (i < active_kp.size()) ? active_kp[i] : 10.0;
     const double kd = (i < active_kd.size()) ? active_kd[i] : 0.5;
+    const double assist = trackingAssist(command_positions_[i]-q_act[i], dq_act[i],
+      params_.tracking_assist_kp[i], params_.tracking_assist_kd[i],
+      params_.tracking_assist_limit[i], assist_permitted);
     const double commanded_torque =
-      kp * (command_positions_[i] - q_act[i]) + kd * (-dq_act[i]) + tau_grav[i] + tau_haptic[i];
+      kp * (command_positions_[i] - q_act[i]) + kd * (-dq_act[i]) + tau_grav[i] + tau_haptic[i] + assist;
     // The motor reports its measured actuator torque.  Removing our own
     // gravity/PD command gives the best available contact-torque estimate in
     // this hardware configuration (no dedicated joint torque sensor).
     interaction_effort[i] = tau_act[i] - commanded_torque;
-    arm_cmds.push_back({kp, kd, command_positions_[i], 0.0, tau_grav[i] + tau_haptic[i]});
+    arm_cmds.push_back({kp, kd, command_positions_[i], 0.0, tau_grav[i] + tau_haptic[i] + assist});
   }
 
   {
@@ -532,6 +572,14 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       const double alpha = std::clamp(params_.force_feedback_filter_alpha, 0.0, 1.0);
       gripper_force_feedback_filtered_ += alpha * (bounded - gripper_force_feedback_filtered_);
       gripper_haptic = gripper_force_feedback_filtered_;
+      if (params_.gripper_contact_feedback) {
+        const auto& motor=openarm_->get_gripper().get_motors()[0];
+        gripper_haptic=gripper_contact_.step(motor.get_position(),
+          calibratedFeedbackVelocity(motor.get_velocity(), params_.velocity_feedback_scale, ARM_DOF),
+          remote_gripper_q_, params_.gripper_max_rad, dt,
+          fresh && remote_gripper_valid_ && !direct_target && !collection_servo &&
+          drive_feedback_guard_.gripperHealthy(std::chrono::steady_clock::now()));
+      }
     }
     if (collection_servo) gripper_haptic = 0.0;
     const double gripper_kp = collection_servo ? 3.0 : (params_.bilateral_position_feedback_enabled ?
@@ -570,8 +618,10 @@ void ArmController::applyPositionLimits(std::vector<double> & positions) const
 }
 
 void ArmController::homeToZeroInterpolated(
-  double duration_s, double timeout_s, double tolerance_rad)
+  double duration_s, double timeout_s, double tolerance_rad,
+  const std::function<bool()> & keep_running)
 {
+  if (!keep_running()) return;
   openarm_->refresh_all();
   openarm_->recv_all();
 
@@ -587,7 +637,7 @@ void ArmController::homeToZeroInterpolated(
     "Startup homing to upstream OpenArm INITIAL_POSITION over %.1f s (timeout %.1f s); motor zero offsets are unchanged.",
     duration_s, timeout_s);
   const auto t0 = std::chrono::steady_clock::now();
-  while (true) {
+  while (keep_running()) {
     const double elapsed =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const double alpha = std::min(elapsed / duration_s, 1.0);
@@ -599,18 +649,30 @@ void ArmController::homeToZeroInterpolated(
     if (alpha >= 1.0) {
       const auto & current_motors = openarm_->get_arm().get_motors();
       double max_error = 0.0;
+      size_t worst_joint = 0;
       for (size_t i = 0; i < std::min(current_motors.size(), ARM_DOF); ++i) {
-        max_error = std::max(
-          max_error, std::abs(current_motors[i].get_position() - configured_home[i]));
+        const double error=std::abs(current_motors[i].get_position()-configured_home[i]);
+        if (error>max_error) {max_error=error; worst_joint=i;}
       }
-      if (max_error <= tolerance_rad) {
+      const bool feedback_ok = !use_drive_feedback_guard_ ||
+        drive_feedback_guard_.healthy(std::chrono::steady_clock::now());
+      if (max_error <= tolerance_rad && feedback_ok) {
         RCLCPP_WARN(logger_, "Startup homing reached upstream initial pose within %.3f rad.", tolerance_rad);
         break;
       }
       if (elapsed >= timeout_s) {
         RCLCPP_ERROR(logger_,
-          "Startup homing timed out with max pose error %.3f rad; holding initial target for inspection.",
-          max_error);
+          "Startup homing timed out: J%zu target=%.4f actual=%.4f error=%.4f rad, feedback_enabled_fresh=%d; latching measured pose, correction off, restart required.",
+          worst_joint+1, configured_home[worst_joint], current_motors[worst_joint].get_position(),
+          max_error, feedback_ok);
+        startup_home_failed_.store(true);
+        // Stop pursuing the unreachable home. Keep gravity/damping, not an
+        // automatic torque-disable, and refuse any later startup-hold release.
+        for (size_t i=0; i<ARM_DOF; ++i) home_target[i]=current_motors[i].get_position();
+        params_.startup_home_target=home_target;
+        command_positions_=home_target;
+        interp_from_=home_target;
+        interp_to_=home_target;
         break;
       }
     }

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,6 +29,9 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 
 #include "openarm_gravity_pd_control/arm_dynamics.hpp"
+#include "openarm_gravity_pd_control/drive_feedback_guard.hpp"
+#include "openarm_gravity_pd_control/gripper_contact.hpp"
+#include "openarm_gravity_pd_control/velocity_feedback.hpp"
 
 namespace openarm_gravity_pd_control {
 
@@ -40,6 +44,14 @@ enum class ArmSide { kRight, kLeft };
  * Defaults are conservative — increase Kp/Kd for stiffer tracking.
  */
 struct ArmControlParams {
+  /// Decoded velocity calibration, J1..J7 then gripper motor; feedback only.
+  VelocityFeedbackScale velocity_feedback_scale{{1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}};
+  // Opt-in bounded candidate; never changes normal leader or gripper feel.
+  bool tracking_assist_enabled = false;
+  bool startup_tracking_assist_enabled = false;
+  std::vector<double> tracking_assist_kp = {20,30,20,35,12,12,25};
+  std::vector<double> tracking_assist_kd = {.5,.5,.4,.6,.2,.2,.3};
+  std::vector<double> tracking_assist_limit = {.8,1.5,1.,1.5,.45,.45,.8};
   std::vector<double> kp = {50.0, 50.0, 50.0, 40.0, 8.0, 8.0, 8.0};
   std::vector<double> kd = {2.0,  2.0,  1.5,  1.5,  0.5, 0.5, 0.4};
   std::vector<double> max_joint_vel = {1.0, 1.0, 1.5, 1.5, 2.0, 2.0, 2.0};
@@ -49,6 +61,7 @@ struct ArmControlParams {
   /// Optional haptic torque reflected from the remote follower.  It is always
   /// bounded and decays to zero when its local message stream becomes stale.
   bool force_feedback_enabled = false;
+  bool gripper_contact_feedback = false;
   double force_feedback_scale = 0.15;
   double force_feedback_filter_alpha = 0.10;
   double force_feedback_timeout_s = 0.05;
@@ -78,8 +91,8 @@ struct ArmControlParams {
   /// Upstream openarm_teleop INITIAL_POSITION: J4 is pi/5, all others zero.
   std::vector<double> startup_home_target = {0.0, 0.0, 0.0, 0.6283185307179586,
                                               0.0, 0.0, 0.0};
-  /// Used only during startup homing, so a gravity-compensated leader can
-  /// return to q=0 without changing its deliberately light normal feel.
+  /// Used during startup homing and explicit saved-pose return, so a
+  /// gravity-compensated leader can move without changing normal FOLLOW feel.
   std::vector<double> startup_home_kp = {30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0};
   std::vector<double> startup_home_kd = {2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4};
 };
@@ -123,7 +136,7 @@ public:
    * INITIAL_POSITION first.
    * @return true on success.
    */
-  bool init();
+  bool init(const std::function<bool()> & keep_running = []() {return true;});
 
   /**
    * Thread-safe update of desired joint positions from a ROS2 topic callback.
@@ -134,7 +147,8 @@ public:
 
   /// Set follower contact-torque estimates received on the leader only.
   /// The values must already be expressed in this controller's joint order.
-  void setForceFeedback(const std::vector<double> & torque);
+  void setForceFeedback(const std::vector<double> & torque,
+                        const std::vector<double> & remote_gripper = {});
   /// Dedicated leader-only bounded return stream. Empty target releases servo.
   void setCollectionTarget(const std::vector<double> & target);
   int collectionMode() const { return collection_mode_.load(); }
@@ -150,7 +164,12 @@ public:
    * leader/follower safety state has reached RUNNING.  This closes the gap
    * between local homing completion and remote ALIGN/RUN acknowledgement.
    */
-  void setStartupHold(bool enabled) { startup_hold_active_.store(enabled); }
+  bool setStartupHold(bool enabled) {
+    if (!enabled && startup_home_failed_.load()) return false;
+    startup_hold_active_.store(enabled);
+    return true;
+  }
+  bool startupHomingFailed() const { return startup_home_failed_.load(); }
 
   /** Refresh feedback without sending MIT commands (supervised safety test only). */
   void feedbackOnlyStep();
@@ -163,7 +182,8 @@ public:
 
 private:
   void applyPositionLimits(std::vector<double> & positions) const;
-  void homeToZeroInterpolated(double duration_s, double timeout_s, double tolerance_rad);
+  void homeToZeroInterpolated(double duration_s, double timeout_s, double tolerance_rad,
+                             const std::function<bool()> & keep_running);
   /// Run one control step toward an optional direct target; nullptr uses ROS commands.
   void executeControlStep(const std::vector<double> * direct_target);
 
@@ -186,9 +206,16 @@ private:
   std::vector<double> force_feedback_filtered_;
   double gripper_force_feedback_target_ = 0.0;
   double gripper_force_feedback_filtered_ = 0.0;
+  double remote_gripper_q_ = 0.0;
+  bool remote_gripper_valid_ = false;
+  GripperContact gripper_contact_;
   std::chrono::steady_clock::time_point force_feedback_time_{};
   bool initialized_ = false;
+  DriveFeedbackGuard drive_feedback_guard_;
+  bool use_drive_feedback_guard_ = false;
+  std::chrono::steady_clock::time_point target_received_{};
   std::atomic<bool> startup_hold_active_{false};
+  std::atomic<bool> startup_home_failed_{false};
   std::mutex collection_mutex_;
   std::vector<double> collection_target_;
   std::chrono::steady_clock::time_point collection_time_{};

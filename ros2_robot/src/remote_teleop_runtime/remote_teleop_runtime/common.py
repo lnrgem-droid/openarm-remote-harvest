@@ -50,6 +50,24 @@ def haptic_desired_axes(leader_reference, follower_reference, applied_action):
     return desired
 
 
+def gripper_contact_reference(state, side):
+    """Optional absolute motor angle, never a startup-relative gripper offset.
+
+    Empty means actively remove contact reflection. Timestamps are compared
+    only within the follower's clock domain. Network/session/sequence checks
+    are performed before this helper is called.
+    """
+    if side not in ('left', 'right'):
+        raise ValueError('invalid side')
+    bit, index = (1, 7) if side == 'left' else (2, 15)
+    if (state.control_state.name != 'RUNNING' or state.fault_bits or
+        state.collection_flags & bit or
+        not 0 <= state.sender_monotonic_ns-state.obs_timestamp_ns <= 50_000_000):
+        return []
+    value = state.positions[index]
+    return [value] if GRIPPER_MAX_RAD <= value <= 0. else []
+
+
 class UnixDatagramClient:
     def __init__(self, server: str):
         self.server = server

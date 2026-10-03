@@ -22,6 +22,13 @@ JOINTS_PER_ARM = 7
 AXES_PER_SIDE = JOINTS_PER_ARM + 1  # seven arm joints plus one gripper joint
 AXIS_COUNT = AXES_PER_SIDE * 2
 MAX_DATAGRAM_SIZE = 1200
+COLLECTION_ACK_LEFT_CAPABLE = 0x10
+COLLECTION_ACK_RIGHT_MASK = 0x03
+COLLECTION_ACK_LEFT_SHIFT = 2
+COLLECTION_ACK_VALUES = (0, 1, 2) + tuple(
+    COLLECTION_ACK_LEFT_CAPABLE | (left << COLLECTION_ACK_LEFT_SHIFT) | right
+    for left in (0, 1, 2) for right in (0, 1, 2))
+COLLECTION_STATE_FLAGS = (0, 1, 2, 3, 6, 7, 9, 11)
 
 # magic, version, type, flags, session, sequence, sender monotonic time,
 # payload length, crc32. CRC is calculated with the crc field set to zero.
@@ -36,6 +43,15 @@ _STATE_AXES = struct.Struct("!56d")
 
 class PacketError(ValueError):
     """Raised when a datagram violates protocol v1."""
+
+
+def decode_collection_ack(value: int) -> tuple[int, int | None]:
+    """Return right/left modes; None explicitly means an old peer lacks left support."""
+    if value not in COLLECTION_ACK_VALUES:
+        raise PacketError("invalid collection acknowledgement")
+    right = value & COLLECTION_ACK_RIGHT_MASK
+    left = (value >> COLLECTION_ACK_LEFT_SHIFT) & 0x03 if value & COLLECTION_ACK_LEFT_CAPABLE else None
+    return right, left
 
 
 class MessageType(IntEnum):
@@ -94,7 +110,8 @@ class ActionCommand:
     sender_monotonic_ns: int
     axes: tuple[float, ...]
     valid_for_ns: int
-    # Physical leader controller: 0=free, 1=return servo, 2=latched failure.
+    # Each side: 0=free, 1=servo, 2=latched failure. Right uses low two bits;
+    # left uses bits 2..3 only when capability mask 0x10 is present.
     collection_ack: int = 0
 
     def __post_init__(self) -> None:
@@ -111,8 +128,7 @@ class ActionCommand:
         object.__setattr__(self, "valid_for_ns", _uint64(self.valid_for_ns, "valid_for_ns"))
         if self.valid_for_ns == 0:
             raise PacketError("valid_for_ns must be greater than zero")
-        if self.collection_ack not in (0, 1, 2):
-            raise PacketError("invalid collection acknowledgement")
+        decode_collection_ack(self.collection_ack)
 
     @property
     def left_arm(self) -> tuple[float, ...]:
@@ -147,8 +163,9 @@ class FollowerState:
     # Estimated contact torque [Nm], with follower gravity and commanded PD
     # torque removed.  Gripper values are currently zero.
     efforts: tuple[float, ...] = (0.0,) * AXIS_COUNT
-    # Header bits: 1=left held, 2=right held/returning, 4=leader return servo.
-    # Bit 4 requires bit 2; the other arm's haptics are unaffected.
+    # Header bits: 1=left held, 2=right held, 4=right leader servo,
+    # 8=left leader servo. A servo requires its follower HOLD and the two
+    # servo bits are mutually exclusive; the single target belongs to that side.
     collection_flags: int = 0
     leader_return_target: tuple[float, ...] = (0.0,) * 8
 
@@ -174,7 +191,7 @@ class FollowerState:
         object.__setattr__(self, "positions", _axis_tuple(self.positions, "positions"))
         object.__setattr__(self, "velocities", _axis_tuple(self.velocities, "velocities"))
         object.__setattr__(self, "efforts", _axis_tuple(self.efforts, "efforts"))
-        if self.collection_flags not in (0, 1, 2, 3, 6, 7):
+        if self.collection_flags not in COLLECTION_STATE_FLAGS:
             raise PacketError("invalid collection flags")
         target = tuple(float(v) for v in self.leader_return_target)
         if len(target) != 8 or not all(math.isfinite(v) for v in target):
@@ -261,7 +278,8 @@ def decode_message(datagram: bytes) -> Message:
         raise PacketError("bad protocol magic")
     if version != PROTOCOL_VERSION:
         raise PacketError(f"unsupported protocol version {version}")
-    if (raw_type == int(MessageType.ACTION) and flags not in (0, 1, 2)) or flags & ~7:
+    if ((raw_type == int(MessageType.ACTION) and flags not in COLLECTION_ACK_VALUES)
+            or (raw_type == int(MessageType.FOLLOWER_STATE) and flags not in COLLECTION_STATE_FLAGS)):
         raise PacketError("invalid message flags")
     if len(datagram) != _HEADER.size + length:
         raise PacketError("payload length does not match datagram length")

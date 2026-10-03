@@ -1,6 +1,6 @@
 import json
 import pytest
-from remote_teleop_runtime.collection_motion import CollectionMotion
+from remote_teleop_runtime.collection_motion import CollectionMotion, RETURN_SPEED_RAD_S
 
 Q = [0., 0., 0., .6, 0., 0., 0., -.4] * 2
 
@@ -56,6 +56,85 @@ def test_saved_pose_survives_restart_and_return_is_bounded(tmp_path):
     assert prev[8:16] == Q[8:16]
     assert master[8:16] == Q[8:16]
     assert m.flags == 1
+
+
+@pytest.mark.parametrize('joint', range(8))
+@pytest.mark.parametrize('longer', ['leader', 'follower'])
+def test_faster_saved_return_limits_both_arms_and_preserves_gripper(tmp_path, joint, longer):
+    m = CollectionMotion(tmp_path / 'pose.json')
+    execute(m, 'right_save'); execute(m, 'left_lock')
+    actual = list(Q); master = list(Q)
+    # Long enough that the 2 s minimum cannot hide an incorrect speed limit.
+    direction = -1. if joint == 7 else 1.
+    actual[8+joint] += direction * (.5 if longer == 'follower' else .4)
+    master[8+joint] += direction * (.5 if longer == 'leader' else .4)
+    execute(m, 'right_return', actual=actual, applied=actual, leader=master)
+    speed = .25 if joint == 7 else .20
+    assert RETURN_SPEED_RAD_S[joint] == speed
+    assert m.duration == pytest.approx(1.875 * .5 / speed)
+    if joint != 7:
+        assert m.duration == pytest.approx(.75 * (1.875 * .5 / .15))
+    peaks = [0., 0.]
+    dt = .01
+    for step in range(1, int((m.duration + 1.) / dt) + 1):
+        previous = actual[:]; previous_master = master[:]
+        actual = m.update(actual, master, 1.+step*dt, True, master,
+                          1 if m.leader_target is not None else 0)
+        if m.leader_target is not None:
+            master[8:16] = m.leader_target
+        for i, (current, old) in enumerate(((actual, previous), (master, previous_master))):
+            peaks[i] = max(peaks[i], abs(current[8+joint]-old[8+joint])/dt)
+        assert actual[:8] == Q[:8]  # Left HOLD must not change.
+    assert max(peaks) <= speed + 1e-9
+    assert max(peaks) > speed * .99
+    assert actual[8:16] == Q[8:16] and master[8:16] == Q[8:16]
+    assert m.phase == 'idle' and not m.returning
+
+
+def test_return_rechecks_leader_distance_after_reset_handshake(tmp_path):
+    m = CollectionMotion(tmp_path / 'pose.json')
+    execute(m, 'right_save'); execute(m, 'left_lock'); execute(m, 'right_return')
+    master = list(Q); master[8] += .8
+    m.update(Q, master, 1.01, True, master, 0)
+    assert m.phase == 'preparing'
+    assert m.duration == pytest.approx(1.875 * .8 / .20)
+
+
+@pytest.mark.parametrize('residual,expected_phase',[(.119,'hold'),(.0524,'idle')])
+def test_return_static_residual_blocks_then_corrected_residual_releases(tmp_path, residual, expected_phase):
+    m = CollectionMotion(tmp_path / 'pose.json')
+    execute(m, 'right_save'); execute(m, 'left_lock')
+    actual = list(Q); actual[10] = -.3
+    master = actual[:]
+    execute(m, 'right_return', actual=actual, applied=actual, leader=master)
+    for step in range(1, 1501):
+        actual = m.update(actual, master, 1.+step*.01, True, master,
+                          1 if m.leader_target is not None else 0)
+        if m.leader_target is not None:
+            target = list(m.leader_target)
+            # Approximate measured steady-state offset with gradual onset;
+            # this tests the state machine, not a complete dynamics model.
+            target[2] -= residual * min(step*.01, 1.)
+            master[8:16] = target
+        if m.phase == 'hold' or (m.phase == 'idle' and not m.returning):
+            break
+    assert m.phase == expected_phase
+    if expected_phase == 'hold':
+        assert '到位超时' in m.note
+        assert m.return_detail['leader_worst_axis'] == 'J3'
+        assert m.return_detail['leader_error_rad'] == pytest.approx(residual)
+        assert m.right is not None and not m.returning
+    else:
+        assert m.right is None and not m.returning
+        assert '恢复跟随' in m.note
+
+
+def test_return_velocity_matches_controller_cap():
+    from pathlib import Path
+    import re
+    header=Path(__file__).resolve().parents[2]/'openarm_gravity_pd_control/include/openarm_gravity_pd_control/tracking_assist.hpp'
+    cap=float(re.search(r'kCollectionReturnMaxVelocity = ([0-9.]+);', header.read_text())[1])
+    assert all(v == cap for v in RETURN_SPEED_RAD_S[:7])
 
 
 def test_no_recording_during_return_or_mutation_during_recording(tmp_path):

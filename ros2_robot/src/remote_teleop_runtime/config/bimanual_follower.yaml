@@ -5,6 +5,11 @@
     enable_left: true
     right_arm_can: can1
     left_arm_can: can2
+    # Measured on both follower buses, 2026-10-03, while disabled.
+    # VMAX: 45/45/20/20/50/50/50/50; compiled decoder: 45/45/8/8/30/30/30/30.
+    # Feedback units only; no drive-parameter, position, torque or gain change.
+    right_velocity_feedback_scale: [1.0, 1.0, 2.5, 2.5, 1.6666666666666667, 1.6666666666666667, 1.6666666666666667, 1.6666666666666667]
+    left_velocity_feedback_scale: [1.0, 1.0, 2.5, 2.5, 1.6666666666666667, 1.6666666666666667, 1.6666666666666667, 1.6666666666666667]
     control_rate: 500.0
     # Startup home is invoked only by the explicit launch argument. It uses the
     # upstream INITIAL_POSITION (J4=pi/5), not an all-zero pose. A 0.06 rad
@@ -17,10 +22,11 @@
     kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 10.0]
     kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.5]
     # 2026-09-20: left J7 alone showed 0.121 rad static error while the actual
-    # CAN target matched the leader. First incremental stiffness/damping trial;
+    # CAN target matched the leader. Kp=15 reduced the near-matched pose error
+    # to 0.062 rad; second incremental trial is Kp=20/Kd=0.7.
     # right arm, startup homing and leader haptics retain their previous gains.
-    left_kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 15.0]
-    left_kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.6]
+    left_kp: [30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 20.0]
+    left_kd: [2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.7]
     # Match the upstream follower gripper stiffness so both jaws can close
     # firmly against the printed fingers.
     gripper_kp: 10.0

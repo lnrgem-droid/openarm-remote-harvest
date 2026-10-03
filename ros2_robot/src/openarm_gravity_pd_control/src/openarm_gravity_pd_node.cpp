@@ -48,10 +48,13 @@
 #include <std_srvs/srv/set_bool.hpp>
 
 #include "openarm_gravity_pd_control/arm_controller.hpp"
+#include "openarm_gravity_pd_control/arm_control_lifecycle.hpp"
 #include "openarm_gravity_pd_control/pd_gains.hpp"
+#include "openarm_gravity_pd_control/tracking_assist.hpp"
 
 using openarm_gravity_pd_control::ArmControlParams;
 using openarm_gravity_pd_control::ArmController;
+using openarm_gravity_pd_control::ArmControlLifecycle;
 using openarm_gravity_pd_control::ArmSide;
 using openarm_gravity_pd_control::JointStateSnapshot;
 
@@ -85,12 +88,15 @@ public:
     declare_parameter("left_kd", std::vector<double>{});
     declare_parameter("right_kp", std::vector<double>{});
     declare_parameter("right_kd", std::vector<double>{});
+    declare_parameter("left_velocity_feedback_scale", std::vector<double>{});
+    declare_parameter("right_velocity_feedback_scale", std::vector<double>{});
     declare_parameter(
       "max_joint_vel", std::vector<double>{1.0, 1.0, 1.5, 1.5, 2.0, 2.0, 2.0});
     declare_parameter("gripper_kp",      16.0);
     declare_parameter("gripper_kd",       0.2);
     declare_parameter("gripper_max_rad",  3.14159265358979);
     declare_parameter("force_feedback_enabled", false);
+    declare_parameter("gripper_contact_feedback", false);
     declare_parameter("force_feedback_scale", 0.15);
     declare_parameter("force_feedback_filter_alpha", 0.10);
     declare_parameter("force_feedback_timeout_s", 0.05);
@@ -111,6 +117,12 @@ public:
       0.0, 0.0, 0.0, 0.6283185307179586, 0.0, 0.0, 0.0});
     declare_parameter("startup_home_kp", std::vector<double>{30.0, 30.0, 15.0, 15.0, 5.0, 5.0, 5.0});
     declare_parameter("startup_home_kd", std::vector<double>{2.2, 2.2, 1.4, 1.4, 0.4, 0.4, 0.4});
+    declare_parameter("tracking_assist_enabled", false);
+    declare_parameter("startup_tracking_assist_enabled", false);
+    declare_parameter("startup_use_tracking_gains", false);
+    declare_parameter("tracking_assist_kp", std::vector<double>{20,30,20,35,12,12,25});
+    declare_parameter("tracking_assist_kd", std::vector<double>{.5,.5,.4,.6,.2,.2,.3});
+    declare_parameter("tracking_assist_limit", std::vector<double>{.8,1.5,1.,1.5,.45,.45,.8});
     declare_parameter("publish_joint_states", true);
     declare_parameter("joint_states_rate", 100.0);
     // Role-specific ROS names prevent a leader and follower on the same LAN
@@ -124,6 +136,7 @@ public:
     declare_parameter("pause_service", std::string("/openarm_gravity_pd/pause_command_refresh"));
     declare_parameter("startup_hold_service", std::string("/openarm_gravity_pd/startup_hold"));
     declare_parameter("collection_return_topic", std::string(""));
+    declare_parameter("collection_left_return_topic", std::string(""));
 
     // ── Read parameters ────────────────────────────────────────────────────
     const std::string urdf_path  = get_parameter("urdf_path").as_string();
@@ -185,6 +198,9 @@ public:
     params.gripper_kd      = get_parameter("gripper_kd").as_double();
     params.gripper_max_rad = get_parameter("gripper_max_rad").as_double();
     params.force_feedback_enabled = get_parameter("force_feedback_enabled").as_bool();
+    params.gripper_contact_feedback = get_parameter("gripper_contact_feedback").as_bool();
+    RCLCPP_INFO(get_logger(), "Gripper contact reflection: %s (closing resistance only, K=4, cap=0.40Nm)",
+      params.gripper_contact_feedback ? "enabled" : "disabled");
     params.force_feedback_scale = get_parameter("force_feedback_scale").as_double();
     params.force_feedback_filter_alpha = get_parameter("force_feedback_filter_alpha").as_double();
     params.force_feedback_timeout_s = get_parameter("force_feedback_timeout_s").as_double();
@@ -204,6 +220,13 @@ public:
     params.startup_home_target = get_parameter("startup_home_target").as_double_array();
     params.startup_home_kp = get_parameter("startup_home_kp").as_double_array();
     params.startup_home_kd = get_parameter("startup_home_kd").as_double_array();
+    params.tracking_assist_enabled = get_parameter("tracking_assist_enabled").as_bool();
+    params.startup_tracking_assist_enabled = get_parameter("startup_tracking_assist_enabled").as_bool();
+    params.tracking_assist_kp = get_parameter("tracking_assist_kp").as_double_array();
+    params.tracking_assist_kd = get_parameter("tracking_assist_kd").as_double_array();
+    params.tracking_assist_limit = get_parameter("tracking_assist_limit").as_double_array();
+    openarm_gravity_pd_control::validateTrackingAssist(
+      params.tracking_assist_kp, params.tracking_assist_kd, params.tracking_assist_limit);
 
     if (params.max_joint_vel.size() != 7) {
       throw std::invalid_argument("max_joint_vel must contain 7 values");
@@ -251,20 +274,29 @@ public:
     for (auto entry : {std::make_pair("left", &left_params),
                        std::make_pair("right", &right_params)}) {
       const std::string prefix(entry.first);
+      entry.second->velocity_feedback_scale =
+        openarm_gravity_pd_control::resolveVelocityFeedbackScale(
+          get_parameter(prefix + "_velocity_feedback_scale").as_double_array(),
+          prefix + "_velocity_feedback_scale");
       entry.second->kp = openarm_gravity_pd_control::resolvePdGains(
         params.kp, get_parameter(prefix + "_kp").as_double_array(), 500.0, prefix + "_kp");
       entry.second->kd = openarm_gravity_pd_control::resolvePdGains(
         params.kd, get_parameter(prefix + "_kd").as_double_array(), 5.0, prefix + "_kd");
-      RCLCPP_INFO(get_logger(), "%s normal J7 gains: Kp=%.3f Kd=%.3f (startup/bilateral unchanged)",
+      if (get_parameter("startup_use_tracking_gains").as_bool()) {
+        entry.second->startup_home_kp = entry.second->kp;
+        entry.second->startup_home_kd = entry.second->kd;
+      }
+      RCLCPP_INFO(get_logger(), "%s normal J7 gains: Kp=%.3f Kd=%.3f",
         prefix.c_str(), entry.second->kp[6], entry.second->kd[6]);
+      RCLCPP_INFO(get_logger(), "%s bounded tracking assist: home=%d tracking=%d; no encoder offset or integral",
+        prefix.c_str(), entry.second->startup_tracking_assist_enabled,
+        entry.second->tracking_assist_enabled);
     }
 
     // ── Create arm controllers ─────────────────────────────────────────────
-    // Construct both controllers before either one begins startup homing.  The
-    // two CAN buses are independent, so homing them in parallel prevents the
-    // first arm from sitting unrefreshed while the second arm completes its
-    // interpolation.  That otherwise creates a physical pose mismatch which
-    // makes the remote automatic ALIGN step fail after a reboot.
+    // Validate both controllers before enabling either bus. Each worker owns
+    // its arm through homing AND continuous hold, including while its peer is
+    // still homing. A homing timeout remains an initialized, latched hold.
     if (enable_right) {
       right_arm_ = std::make_unique<ArmController>(
         right_can, urdf_path, "openarm_body_link0", "openarm_right_hand",
@@ -276,29 +308,40 @@ public:
         ArmSide::kLeft, joint_limits_path, left_params, get_logger());
     }
 
-    bool right_init_ok = true;
-    bool left_init_ok = true;
-    std::thread right_init_thread;
-    std::thread left_init_thread;
-    if (right_arm_) {
-      right_init_thread = std::thread([this, &right_init_ok]() {
-        right_init_ok = right_arm_->init();
+    std::vector<ArmControlLifecycle::Arm> arms;
+    for (auto * arm : {right_arm_.get(), left_arm_.get()}) {
+      if (!arm) continue;
+      arms.push_back({arm == right_arm_.get() ? "right" : "left",
+        [arm](const ArmControlLifecycle::Continue & keep_running) {return arm->init(keep_running);},
+        [this, arm]() {controlStep(arm);}, [arm]() {arm->disable();}});
+    }
+    control_lifecycle_ = std::make_shared<ArmControlLifecycle>();
+    // A concurrent shutdown callback can temporarily own the shared lifecycle.
+    // Explicit cleanup on constructor unwind must not depend on last-owner
+    // destruction: controllers and the captured `this` must still be alive.
+    struct ConstructionGuard {
+      ArmControlLifecycle & control;
+      bool complete = false;
+      ~ConstructionGuard() {if (!complete) control.stop();}
+    } construction_guard{*control_lifecycle_};
+    const auto context = get_node_base_interface()->get_context();
+    const auto logger = get_logger();
+    control_lifecycle_->start(std::move(arms),
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(1.0 / control_rate)),
+      [context]() {return context->is_valid();},
+      [logger](std::exception_ptr error) {
+        try {std::rethrow_exception(error);}
+        catch (const std::exception & e) {
+          RCLCPP_ERROR(logger, "Arm control stopped; disable attempted for both arms: %s", e.what());
+        } catch (...) {RCLCPP_ERROR(logger, "Arm control stopped; unknown worker exception");}
       });
-    }
-    if (left_arm_) {
-      left_init_thread = std::thread([this, &left_init_ok]() {
-        left_init_ok = left_arm_->init();
-      });
-    }
-    if (right_init_thread.joinable()) right_init_thread.join();
-    if (left_init_thread.joinable()) left_init_thread.join();
-
-    if (!right_init_ok) {
-      throw std::runtime_error("right arm init failed on " + right_can);
-    }
-    if (!left_init_ok) {
-      throw std::runtime_error("left arm init failed on " + left_can);
-    }
+    // No raw `this`: callbacks may outlive a failed constructor or destroyed node.
+    const std::weak_ptr<ArmControlLifecycle> lifecycle = control_lifecycle_;
+    rclcpp::on_shutdown([lifecycle]() {
+      if (const auto control = lifecycle.lock()) control->stop();
+    }, context);
+    control_lifecycle_->waitInitialized();
 
     // Teleoperation commands are state targets, not a trajectory queue.
     // Retaining only the newest sample prevents replaying stale commands.
@@ -309,6 +352,14 @@ public:
         collection_topic, command_qos,
         [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
           if (right_arm_) right_arm_->setCollectionTarget(msg->position);
+        });
+    }
+    const auto left_collection_topic = get_parameter("collection_left_return_topic").as_string();
+    if (!left_collection_topic.empty()) {
+      left_collection_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+        left_collection_topic, command_qos,
+        [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+          if (left_arm_) left_arm_->setCollectionTarget(msg->position);
         });
     }
 
@@ -326,12 +377,12 @@ public:
     right_force_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       right_force_feedback_topic, command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-        if (right_arm_) right_arm_->setForceFeedback(msg->effort);
+        if (right_arm_) right_arm_->setForceFeedback(msg->effort, msg->position);
       });
     left_force_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       left_force_feedback_topic, command_qos,
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-        if (left_arm_) left_arm_->setForceFeedback(msg->effort);
+        if (left_arm_) left_arm_->setForceFeedback(msg->effort, msg->position);
       });
 
     if (publish_joint_states && joint_states_rate > 0.0) {
@@ -367,6 +418,12 @@ public:
       startup_hold_service,
       [this](const std_srvs::srv::SetBool::Request::SharedPtr request,
              std_srvs::srv::SetBool::Response::SharedPtr response) {
+        if (!request->data && ((right_arm_ && right_arm_->startupHomingFailed()) ||
+                              (left_arm_ && left_arm_->startupHomingFailed()))) {
+          response->success = false;
+          response->message = "startup homing failed; measured hold latched; restart required";
+          return;
+        }
         if (right_arm_) right_arm_->setStartupHold(request->data);
         if (left_arm_) left_arm_->setStartupHold(request->data);
         response->success = true;
@@ -374,24 +431,8 @@ public:
           "startup pose hold enabled" : "startup pose hold released";
       });
 
-    // CAN I/O must not block the ROS executor. Each arm owns one CAN interface,
-    // so run them independently at an absolute 500 Hz schedule.
-    control_running_.store(true);
-    const auto control_period = std::chrono::duration<double>(1.0 / control_rate);
-    if (right_arm_ && right_arm_->isInitialized()) {
-      right_control_thread_ =
-        std::thread([this, control_period]() { controlThread(right_arm_.get(), control_period); });
-    }
-    if (left_arm_ && left_arm_->isInitialized()) {
-      left_control_thread_ =
-        std::thread([this, control_period]() { controlThread(left_arm_.get(), control_period); });
-    }
-
-    // Guarantee motors are disabled even on Ctrl+C / crash / rclcpp shutdown,
-    // not only when the node destructor happens to run.
-    rclcpp::on_shutdown([this]() { disableArms(); });
-
     RCLCPP_INFO(get_logger(), "Node started. Control loop running at %.0f Hz.", control_rate);
+    construction_guard.complete = true;
   }
 
   ~OpenArmGravityPDNode()
@@ -406,45 +447,20 @@ private:
     if (disabled_.exchange(true)) {
       return;
     }
-    control_running_.store(false);
-    if (right_control_thread_.joinable()) {
-      right_control_thread_.join();
-    }
-    if (left_control_thread_.joinable()) {
-      left_control_thread_.join();
-    }
+    if (control_lifecycle_) control_lifecycle_->stop();
     if (joint_state_timer_) {
       joint_state_timer_->cancel();
     }
-    if (right_arm_) {
-      right_arm_->disable();
-    }
-    if (left_arm_) {
-      left_arm_->disable();
-    }
   }
 
-  void controlThread(
-    ArmController * arm,
-    const std::chrono::duration<double> period)
+  void controlStep(ArmController * arm)
   {
-    auto next = std::chrono::steady_clock::now();
-    while (control_running_.load()) {
-      if (command_refresh_paused_.load()) {
-        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (now_ns >= pause_deadline_ns_.load()) command_refresh_paused_.store(false);
-      }
-      if (command_refresh_paused_.load()) arm->feedbackOnlyStep(); else arm->controlStep();
-      next += std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);
-
-      const auto now = std::chrono::steady_clock::now();
-      if (next < now) {
-        // Do not run catch-up bursts after a delayed CAN cycle.
-        next = now;
-      }
-      std::this_thread::sleep_until(next);
+    if (command_refresh_paused_.load()) {
+      const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (now_ns >= pause_deadline_ns_.load()) command_refresh_paused_.store(false);
     }
+    if (command_refresh_paused_.load()) arm->feedbackOnlyStep(); else arm->controlStep();
   }
 
   static void appendArmState(
@@ -468,7 +484,9 @@ private:
 
   void publishJointStates()
   {
-    if (!joint_state_pub_) {
+    // After cancellation/error, cached joint positions must not be restamped
+    // as fresh feedback while the coordinator joins/disables the workers.
+    if (!joint_state_pub_ || !control_lifecycle_ || control_lifecycle_->stopping()) {
       return;
     }
 
@@ -484,6 +502,12 @@ private:
     msg.header.stamp = get_clock()->now();
     if (has_left) {
       appendArmState(msg, LEFT_JOINT_NAMES, "openarm_left_finger_joint1", left_state);
+      if (left_collection_sub_) {
+        msg.name.push_back("openarm_left_collection_mode");
+        msg.position.push_back(left_arm_->collectionMode());
+        msg.velocity.push_back(0.0);
+        msg.effort.push_back(0.0);
+      }
     }
     if (has_right) {
       appendArmState(msg, RIGHT_JOINT_NAMES, "openarm_right_finger_joint1", right_state);
@@ -499,6 +523,7 @@ private:
 
   std::unique_ptr<ArmController> right_arm_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr collection_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr left_collection_sub_;
   std::unique_ptr<ArmController> left_arm_;
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_sub_;
@@ -510,12 +535,12 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disable_service_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr pause_service_;
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr startup_hold_service_;
-  std::thread right_control_thread_;
-  std::thread left_control_thread_;
-  std::atomic<bool> control_running_{false};
   std::atomic<bool> disabled_{false};
   std::atomic<bool> command_refresh_paused_{false};
   std::atomic<int64_t> pause_deadline_ns_{0};
+  // Declared last: constructor-unwind joins workers before any captured member
+  // or ArmController is destroyed.
+  std::shared_ptr<ArmControlLifecycle> control_lifecycle_;
 };
 
 int main(int argc, char ** argv)

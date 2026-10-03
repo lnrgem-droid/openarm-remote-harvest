@@ -46,19 +46,78 @@ status_is_safe_to_reuse() {
   # Position error alone cannot prove the motors are powered. More importantly,
   # a held/contact-loaded arm must NEVER cause opening the UI to re-home it.
   /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" \
-    --max-tracking-error-rad 0.20 <<<"$1"
+    --max-tracking-error-rad 0.20 \
+    --health-report /tmp/openarm-remote-teleop/live-health.json \
+    --startup-report /tmp/openarm-remote-teleop/alignment-following.json "${@:2}" <<<"$1"
 }
 
 refresh_healthy_running_status() {
   local attempt
-  for attempt in $(seq 1 5); do
+  for attempt in $(seq 1 12); do
     status="$(teleop_status)"
     if status_is_safe_to_reuse "$status"; then
       return 0
     fi
-    sleep 0.2
+    sleep 0.5
   done
   return 1
+}
+
+recover_restarted_peer() {
+  # Return 1: not an eligible reboot/disabled timeout; 2: cancelled/unavailable;
+  # 3: evidence changed after confirmation. Do not turn cancellation into a
+  # generic CAN/control failure in the caller.
+  local report="$LOG_DIR/recovery-evidence.json" confirmation boot_before boot_after read_status
+  local recovery_code identity_before identity_after
+  /usr/bin/python3 "$TELEOP_ROOT/scripts/inspect_teleop_recovery.py" \
+    --jetson "$JETSON_HOST" --output "$report" >/dev/null || return 1
+  /usr/bin/python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("恢复检查："+r["reason"]); sys.exit(not r["confirmation_required"])' "$report" || return 1
+  boot_before="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["evidence"]["remote"]["boot_id"])' "$report")"
+  recovery_code="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["code"])' "$report")"
+  identity_before="$(/usr/bin/python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r["evidence"]; print(json.dumps([r["code"],e.get("host_service_pid"),(e.get("host_unit") or {}).get("InvocationID"),e["remote"].get("process_identities"),(e["remote"].get("status") or {}).get("leader_session_id"),(e.get("power_down_receipt") or {}).get("shutdown_id")],sort_keys=True))' "$report")"
+  if [[ "$recovery_code" == HEALTH_LATCH_CONFIRM ]]; then
+    echo '当前电机已使能，但后台曾记录本会话反馈异常；现在的 ENABLED 不会抹掉历史锁定。'
+    echo '本次恢复将建立新会话，四条机械臂会重新归位、对齐；不会直接清除旧锁定。'
+  elif [[ "$recovery_code" == OPERATOR_POWER_DOWN_CONFIRM ]]; then
+    echo '检测到上次通过“机械臂下电”完成的正常失能记录。Jetson保持开机，旧控制进程仍保留下电后的故障状态。'
+    echo '这不等于新的CAN硬件故障，也不能直接复用旧会话；确认后将重新使能、归位、对齐。'
+    echo '已保存的右臂采摘起始位不会删除；本次不会自动回到该保存位置。'
+  elif [[ "$recovery_code" == DISABLED_TIMEOUT_CONFIRM ]]; then
+    echo '机械臂已重新上电或失能，但电脑还保留旧超时会话；这不是新的启动成功状态。'
+    echo '确认恢复将清理旧会话及左/右保持任务，重新使能并让四臂回程序初始位。'
+    echo '已保存的右臂采摘起始位不会删除；本次不会自动回到该保存位置。'
+  else
+    echo '这不是普通网线重连：Jetson已经重启，主机保留的是失效会话。'
+  fi
+  echo '现在不能遥操。恢复会让四臂重新归位，不会续录旧episode。'
+  echo '【等待你的确认，不是卡住】确认无夹持物、四臂路径安全、急停可用后，点击此终端，输入 r 或“恢复”并回车。'
+  echo '60秒内未确认将取消；此时不能遥操。其他输入也会取消，不会重新归位。'
+  if read -r -t 60 confirmation; then
+    case "$confirmation" in
+      r|R|恢复) ;;
+      *) echo '已取消恢复：输入未匹配 r / 恢复。本次未重新归位，也未进入遥操。'; return 2 ;;
+    esac
+  else
+    read_status=$?
+    if (( read_status > 128 )); then
+      echo '已取消恢复：60秒内未完成确认（或等待被中断）。本次未重新归位。'
+    else
+      echo '已取消恢复：终端输入已结束或不可读取（EOF），未获得确认。本次未重新归位。'
+    fi
+    return 2
+  fi
+  echo '已收到恢复确认，正在重新核实电机、Jetson和录制状态；请等待，暂不能遥操。'
+  /usr/bin/python3 "$TELEOP_ROOT/scripts/inspect_teleop_recovery.py" \
+    --jetson "$JETSON_HOST" --output "$report" >/dev/null || { echo 'ERROR: 二次恢复检查失败，不重新归位。' >&2; return 3; }
+  boot_after="$(/usr/bin/python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["evidence"]["remote"]["boot_id"]); sys.exit(not r["confirmation_required"])' "$report")" || { echo "ERROR: 确认期间恢复条件发生变化，不重新归位。详情：$report" >&2; return 3; }
+  [[ "$boot_before" == "$boot_after" ]] || { echo 'ERROR: 确认期间Jetson再次重启，取消恢复。' >&2; return 3; }
+  identity_after="$(/usr/bin/python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r["evidence"]; print(json.dumps([r["code"],e.get("host_service_pid"),(e.get("host_unit") or {}).get("InvocationID"),e["remote"].get("process_identities"),(e["remote"].get("status") or {}).get("leader_session_id"),(e.get("power_down_receipt") or {}).get("shutdown_id")],sort_keys=True))' "$report")"
+  [[ "$identity_before" == "$identity_after" ]] || { echo 'ERROR: 确认期间控制会话或恢复类型改变，请重新检查后确认，不重新归位。' >&2; return 3; }
+  if [[ "$recovery_code" == OPERATOR_POWER_DOWN_CONFIRM ]]; then
+    /usr/bin/python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); from inspect_teleop_recovery import consume_power_down_receipt; r=json.load(open(sys.argv[2])); consume_power_down_receipt(r["evidence"]["power_down_receipt"]["shutdown_id"])' \
+      "$TELEOP_ROOT/scripts" "$report" || { echo 'ERROR: 正常下电记录更新失败，不重新归位。' >&2; return 3; }
+  fi
+  echo '二次检查通过：本次明确请求重新初始化、归位、对齐；完成前不能遥操。'
 }
 
 ensure_host_can() {
@@ -183,11 +242,17 @@ def request(command):
     socket.connect(endpoint); socket.send_json({"command": command})
     response = socket.recv_json(); socket.close(0); context.term(); return response
 status = request("status")
+if status.get("phase") == "awaiting_result" and status.get("recording_active") is False:
+    print("上次录制已中断，原条目等待你选择成功或失败并保存；即将打开该条目，不自动跳号。")
+    raise SystemExit(0)
 if status.get("running"):
     print("发现上次遗留录制，正在停止并保存：" + str(status.get("dataset_root")))
     request("stop")
     for _ in range(12):
         time.sleep(1); status = request("status")
+        if status.get("phase") == "awaiting_result" and status.get("recording_active") is False:
+            print("录制已停止，条目保留等待你确认保存；即将打开原条目。")
+            raise SystemExit(0)
         if not status.get("running"):
             break
 if status.get("running"):
@@ -212,8 +277,8 @@ echo "  机械臂可能运动：否（本步骤只检查主机 CAN、网线、IP
 echo "  现在可以遥操：否"
 echo "  你现在应当：保持机械臂静止，等待检查完成"
 ensure_host_can
-ping -c 2 -W 1 "$PEER_IP"
-ssh -o ConnectTimeout=8 "$JETSON_HOST" 'hostname; uptime -p'
+ping -c 2 -W 1 "$PEER_IP" || { echo 'ERROR: 有线网络不可达；本次不启动、不恢复运动。检查网线、Jetson电源与192.168.50.2。' >&2; exit 2; }
+ssh -o ConnectTimeout=8 "$JETSON_HOST" 'hostname; uptime -p' || { echo 'ERROR: SSH连接失败；网络连通不等于Jetson服务就绪，本次不恢复运动。' >&2; exit 2; }
 say "2/5 检查 Jetson 从臂 CAN 与 RGB-D 服务"
 echo "  机械臂可能运动：否（本步骤只检查 CAN、相机和录制服务）"
 echo "  现在可以遥操：否"
@@ -228,17 +293,82 @@ echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_COR
 # FAULT.  A regular unit has atomic, repeatable restart semantics.
 ensure_teleop_service
 status="$(teleop_status)"
-if refresh_healthy_running_status; then
+motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST")" || true
+motors_enabled=false
+recover_power_cycle=false
+if /usr/bin/python3 -c 'import json,sys; sys.exit(json.load(sys.stdin).get("result") != "ENABLED")' <<<"$motor_report"; then
+  motors_enabled=true
+elif /usr/bin/python3 "$TELEOP_ROOT/scripts/check_power_cycle_recovery.py" <<<"[$status,$motor_report]"; then
+  echo '检测到旧控制栈仍为 RUNNING，但主从 32 个电机均未使能（可能刚断电重上电）。'
+  echo '不能复用旧状态；本次将重新初始化、归位、对齐，完成前不能遥操。'
+  echo '请确认电源稳定、急停已按正常流程解除、四臂路径安全且无夹持物。'
+  # A stale RUNNING may follow power loss while holding an object. Never
+  # treat opening the preview as permission to move four arms after a fault.
+  echo '确认无夹持物、四臂路径清空、有人守急停后输入 r 或“恢复”并回车；其他输入取消。'
+  confirmation=''
+  if ! read -r -t 60 confirmation </dev/tty; then
+    echo '未收到恢复确认，不重新使能或归位。' >&2; exit 2
+  fi
+  case "$confirmation" in r|R|恢复) ;; *) echo '已取消恢复，不驱动机械臂。'; exit 2 ;; esac
+  # A separate recorder may still be saving even if the control lock is clear.
+  if ! ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python -' <<'PY'
+import zmq
+context = zmq.Context()
+socket = context.socket(zmq.REQ)
+socket.setsockopt(zmq.LINGER, 0)
+socket.setsockopt(zmq.SNDTIMEO, 3000)
+socket.setsockopt(zmq.RCVTIMEO, 3000)
+socket.connect("tcp://127.0.0.1:5557")
+try:
+    socket.send_json({"command": "status"})
+    reply = socket.recv_json()
+    if reply.get("ok") is not True or reply.get("running") is not False:
+        raise RuntimeError("录制器未确认空闲，请先停止并保存")
+finally:
+    socket.close(0)
+    context.term()
+PY
+  then
+    echo 'ERROR: 未确认录制空闲，不重新归位。' >&2
+    exit 2
+  fi
+  # Recheck after the countdown and recorder query; never use stale approval.
+  status="$(teleop_status)"
+  motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST")" || true
+  if ! /usr/bin/python3 "$TELEOP_ROOT/scripts/check_power_cycle_recovery.py" <<<"[$status,$motor_report]"; then
+    echo 'ERROR: 确认期间状态发生变化，本次不重新归位。' >&2
+    exit 2
+  fi
+  recover_power_cycle=true
+fi
+if [[ "$recover_power_cycle" != true ]] && {
+   [[ "$motors_enabled" != true ]] || ! status_is_safe_to_reuse "$status"; } && {
+   systemctl --user is-active --quiet "$TELEOP_SERVICE" ||
+   [[ -f "$HOME/.local/state/openarm/last-power-down.json" ]]; }; then
+  if recover_restarted_peer; then
+    recover_power_cycle=true
+  else
+    recovery_result=$?
+    if [[ "$recovery_result" == 2 || "$recovery_result" == 3 ]]; then
+      echo '现在不能遥操。如需重试，请重新打开桌面启动器，在恢复提示处确认；末尾“按 Enter 关闭”不能恢复启动。'
+      exit 2
+    fi
+  fi
+fi
+if [[ "$recover_power_cycle" != true && "$motors_enabled" == true ]] && refresh_healthy_running_status; then
   say "3/5 复用已经运行的双臂遥操"
   echo "  机械臂可能运动：是；现有主从跟随保持不变，不重新归零"
   echo "  现在可以遥操：仅处于 FOLLOW 的手臂；HOLD/回位状态保持不变"
   echo "  遥操状态：RUNNING；重复打开采集界面不会中断现有控制。"
-elif systemctl --user is-active --quiet "$TELEOP_SERVICE" ||
-     grep -Eq '"state": "(RUNNING|FAULT|E_STOP)"' <<<"$status"; then
+elif [[ "$recover_power_cycle" != true ]] && {
+     systemctl --user is-active --quiet "$TELEOP_SERVICE" ||
+     grep -Eq '"state": "(RUNNING|FAULT|E_STOP)"' <<<"$status"; }; then
   echo 'ERROR: 已有控制栈但健康检查未通过。本次只退出启动，不自动重启或归零。' >&2
-  echo '请查看控制状态与故障，安置好物体后再明确重新启动遥操核心脚本。' >&2
-  echo '确认主从运动路径安全后，可执行：systemctl --user restart openarm-remote-teleop.service（会重新归位）。' >&2
+  status_is_safe_to_reuse "$status" --explain || true
+  echo '若提示历史健康锁定，排除异常并清空四臂路径后，重新打开启动器，按恢复提示确认。' >&2
+  echo '真实电机故障、未知反馈、HOLD/回位或录制中不会自动重启。' >&2
   echo "$status" >&2
+  echo "电机真实使能检查：$motor_report" >&2
   exit 2
 else
   say "3/5 启动受控双臂遥操"
@@ -279,6 +409,22 @@ else
     echo "ERROR: 本次启动未在 140 秒内完成全部跟随准入条件。查看 $LOG_DIR/teleop.log" >&2
     exit 1
   fi
+fi
+echo '  正在核实本会话两端全部 32 个电机的持续健康检查…'
+physical_ready=false
+for attempt in $(seq 1 12); do
+  status="$(teleop_status)"
+  if /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" \
+      --health-report /tmp/openarm-remote-teleop/live-health.json <<<"$status"; then
+    physical_ready=true; break
+  fi
+  sleep 0.5
+done
+if [[ "$physical_ready" != true ]]; then
+  echo 'ERROR: 电机健康检查未通过；即使软件显示 RUNNING，也不能宣布可遥操。本次不自动重启。' >&2
+  /usr/bin/python3 "$TELEOP_ROOT/scripts/check_remote_running_status.py" --explain \
+    --health-report /tmp/openarm-remote-teleop/live-health.json <<<"$status" || true
+  exit 2
 fi
 echo "  机械臂可能运动：是；各臂按 FOLLOW/HOLD/回位模式运行"
 echo "  现在可以遥操：仅 FOLLOW 手臂；请查看界面的左右臂模式"

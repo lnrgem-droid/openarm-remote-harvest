@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import secrets
 import socket
 import threading
@@ -12,8 +13,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
 from remote_teleop_protocol import ActionCommand, FollowerState, PacketError, decode_message, encode_action
+from remote_teleop_protocol.protocol import (
+    COLLECTION_ACK_LEFT_CAPABLE, COLLECTION_ACK_LEFT_SHIFT, COLLECTION_STATE_FLAGS,
+)
 from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
-                     haptic_desired_axes,
+                     haptic_desired_axes, gripper_contact_reference,
                      LEADER_JOINT_STATES_TOPIC, LEADER_LEFT_COMMAND_TOPIC,
                      LEADER_LEFT_FORCE_FEEDBACK_TOPIC, LEADER_RIGHT_COMMAND_TOPIC,
                      LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, STATE_PORT)
@@ -32,10 +36,16 @@ class LeaderGateway(Node):
         self.have_left = False
         self.right_rx = self.left_rx = 0.0
         self.collection_ack = 0
+        # None means the physical controller did not explicitly advertise left
+        # collection support. Never turn an old controller's missing mode into
+        # an acknowledgement that the left master is free and can be driven.
+        self.left_collection_ack = None
+        self.left_collection_mode_invalid = False
         self.state_session = None
         self.state_sequence = 0
         self.state_rx = 0.0
         self.return_requested = False
+        self.left_return_requested = False
         self.lock = threading.Lock()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", STATE_PORT))
@@ -43,6 +53,8 @@ class LeaderGateway(Node):
         self.create_subscription(JointState, LEADER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
         self.right_force_pub = self.create_publisher(JointState, LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, 1)
         self.return_pub = self.create_publisher(JointState, "/leader/right_arm/collection_return", 1)
+        self.left_return_pub = (self.create_publisher(
+            JointState, "/leader/left_arm/collection_return", 1) if enable_left else None)
         self.left_force_pub = (self.create_publisher(JointState, LEADER_LEFT_FORCE_FEEDBACK_TOPIC, 1)
                                if enable_left else None)
         self.right_position_feedback_pub = self.create_publisher(
@@ -110,47 +122,105 @@ class LeaderGateway(Node):
         if state.collection_flags & 2:
             efforts = [0.0] * 8
         right = JointState(); right.effort = efforts
+        # Private haptic topic: one position value is the follower gripper's
+        # actual motor angle. It is NOT an eight-axis joint_command message.
+        right.position = gripper_contact_reference(state, 'right')
         self.right_force_pub.publish(right)
         if self.enable_left:
             left = JointState(); left.effort = left_efforts
+            left.position = gripper_contact_reference(state, 'left')
             self.left_force_pub.publish(left)
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position))
         with self.lock:
-            right_names = [f"openarm_right_joint{i}" for i in range(1, 8)]
-            if all(name in values for name in right_names):
-                self.axes[8:15] = [float(values[name]) for name in right_names]
-                finger = float(values.get("openarm_right_finger_joint1", 0.0))
-                self.axes[15] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
-                self.have_right = True
-                self.right_rx = time.monotonic()
-                self.collection_ack = int(values.get("openarm_right_collection_mode", 2))
-            if self.enable_left:
-                left_names = [f"openarm_left_joint{i}" for i in range(1, 8)]
-                if all(name in values for name in left_names):
-                    self.axes[0:7] = [float(values[name]) for name in left_names]
-                    finger = float(values.get("openarm_left_finger_joint1", 0.0))
-                    self.axes[7] = max(0.0, min(1.0, finger / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
-                self.have_left = True
-                self.left_rx = time.monotonic()
+            for side, offset in (("right", 8), ("left", 0)):
+                if side == "left" and not self.enable_left:
+                    continue
+                names = [f"openarm_{side}_joint{i}" for i in range(1, 8)]
+                names.append(f"openarm_{side}_finger_joint1")
+                # A partial message must not refresh old axes, including the
+                # gripper, or claim a new physical collection acknowledgement.
+                try:
+                    axes = [float(values[name]) for name in names]
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if not all(math.isfinite(value) for value in axes):
+                    continue
+                axes[7] = max(0.0, min(1.0, axes[7] / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
+                self.axes[offset:offset + 8] = axes
+                setattr(self, f"have_{side}", True)
+                setattr(self, f"{side}_rx", time.monotonic())
+                mode = values.get(f"openarm_{side}_collection_mode")
+                # JointState encodes modes as doubles. Fractional/unknown
+                # values are not valid modes and must not be truncated to 0.
+                mode = int(mode) if mode in (0, 1, 2) else None
+                if side == "right":
+                    self.collection_ack = mode if mode is not None else 2
+                else:
+                    self.left_collection_ack = mode
+                    self.left_collection_mode_invalid = (
+                        f"openarm_{side}_collection_mode" in values and mode is None)
+
+    def collection_acknowledgement(self):
+        ack = self.collection_ack
+        if self.enable_left and self.left_collection_ack is not None:
+            ack |= COLLECTION_ACK_LEFT_CAPABLE | (self.left_collection_ack << COLLECTION_ACK_LEFT_SHIFT)
+        return ack
 
     def publish_return(self, state):
         # An explicit peer packet is required to release a latched servo. A
         # missing packet instead leaves the local 100 ms controller watchdog
         # holding the measured pose; it never resumes a stored trajectory.
-        message = JointState()
-        requested = bool(state.collection_flags & 4)
-        if requested:
-            if state.control_state.name != "RUNNING" or state.fault_bits:
-                return  # local timeout stops any trajectory and latches hold
-            message.position = list(state.leader_return_target)
-            self.return_requested = True
-        elif self.return_requested or self.collection_ack:
-            self.return_requested = False
-        else:
+        flags = state.collection_flags
+        if flags not in COLLECTION_STATE_FLAGS:
+            return  # includes simultaneous left/right servo requests
+        if state.control_state.name != "RUNNING" or state.fault_bits:
+            return  # local timeout stops any trajectory and latches hold
+        obs_age = state.sender_monotonic_ns - state.obs_timestamp_ns
+        if not 0 <= obs_age <= 100_000_000:
             return
-        self.return_pub.publish(message)
+        with self.lock:
+            now = time.monotonic()
+            if (not self.have_right or not 0 <= now - self.right_rx <= .1 or
+                (self.enable_left and
+                 (not self.have_left or not 0 <= now - self.left_rx <= .1))):
+                return
+            right_ack, left_ack = self.collection_ack, self.left_collection_ack
+            left_mode_invalid = self.left_collection_mode_invalid
+        requested_right, requested_left = bool(flags & 4), bool(flags & 8)
+        if requested_right or requested_left:
+            try:
+                target = [float(value) for value in state.leader_return_target]
+            except (TypeError, ValueError, OverflowError):
+                return
+            if len(target) != 8 or not all(math.isfinite(value) for value in target):
+                return
+            if requested_left:
+                if (not self.enable_left or self.left_return_pub is None or
+                    left_ack not in (0, 1) or right_ack != 0 or self.return_requested):
+                    return
+                publisher = self.left_return_pub
+                self.left_return_requested = True
+            else:
+                if (right_ack not in (0, 1) or left_ack not in (None, 0) or
+                    left_mode_invalid or self.left_return_requested):
+                    return
+                publisher = self.return_pub
+                self.return_requested = True
+            message = JointState()
+            message.position = target
+            publisher.publish(message)
+            return
+        # No servo bit is an explicit release, independently acknowledged by
+        # each side. An opposite target never implicitly releases a busy side.
+        if self.return_requested or right_ack:
+            self.return_pub.publish(JointState())
+            self.return_requested = False
+        if (self.enable_left and self.left_return_pub is not None and
+            left_ack is not None and (self.left_return_requested or left_ack)):
+            self.left_return_pub.publish(JointState())
+            self.left_return_requested = False
 
     def tick(self):
         with self.lock:
@@ -160,10 +230,11 @@ class LeaderGateway(Node):
             if (time.monotonic()-self.right_rx > 0.10 or
                 (self.enable_left and time.monotonic()-self.left_rx > 0.10)):
                 return  # don't turn stale physical feedback into fresh actions
+            collection_ack = self.collection_acknowledgement()
         self.sequence += 1
         now_ns = time.monotonic_ns()
         msg = ActionCommand(self.session, self.sequence, now_ns, axes, 100_000_000,
-                            self.collection_ack)
+                            collection_ack)
         self.sock.sendto(encode_action(msg), (self.peer, ACTION_PORT))
         self.action_history[self.sequence] = axes
         if len(self.action_history) > 256:
