@@ -941,8 +941,10 @@ class MushroomCollectionApp:
 
     def _build(self) -> None:
         self.root.title("OpenArm 蘑菇采摘 RGB-D 数据采集控制台")
-        height = min(1100, max(680, self.root.winfo_screenheight() - 100))
-        self.root.geometry(f"1800x{height}"); self.root.minsize(1100, 680); self.root.configure(bg=BG)
+        width = min(1900, max(1100, self.root.winfo_screenwidth() - 24))
+        height = min(1100, max(680, self.root.winfo_screenheight() - 75))
+        compact = width >= 1600 and height >= 900
+        self.root.geometry(f"{width}x{height}"); self.root.minsize(1100, 680); self.root.configure(bg=BG)
         top = tk.Frame(self.root, bg=BG, height=52); top.pack(fill="x", padx=14, pady=(7, 3)); top.pack_propagate(False)
         top.grid_columnconfigure(1, weight=1)
         tk.Label(top, text="OpenArm｜蘑菇采摘 RGB-D 数据采集控制台", bg=BG, fg=TEXT,
@@ -979,25 +981,39 @@ class MushroomCollectionApp:
             _, title, color = TASKS[side]
             card = tk.Frame(tasks, bg=PANEL, highlightbackground=color, highlightthickness=2)
             card.grid(row=0, column=column, sticky="nsew", padx=6); tasks.grid_rowconfigure(0, weight=1)
-            tk.Label(card, text=title, bg=PANEL, fg=color, font=("Noto Sans CJK SC", 15, "bold")).pack(anchor="w", padx=18, pady=(8, 2))
-            tk.Label(card, textvariable=self.count_vars[side], bg=PANEL, fg=TEXT,
-                     font=("Noto Sans CJK SC", 19, "bold")).pack(anchor="w", padx=24)
-            tk.Label(card, textvariable=self.subcount_vars[side], bg=PANEL, fg=MUTED,
-                     font=("Noto Sans CJK SC", 11)).pack(anchor="w", padx=30)
-            tk.Label(card, textvariable=self.storage_vars[side], bg=PANEL, fg="#79cfe8",
-                     font=("Noto Sans Mono CJK SC", 10)).pack(anchor="w", padx=30, pady=(2, 0))
-            controls = tk.Frame(card, bg=PANEL); controls.pack(fill="x", padx=12, pady=3)
+            if compact:
+                heading = tk.Frame(card, bg=PANEL); heading.pack(fill="x", padx=16, pady=(6, 0))
+                tk.Label(heading, text=title, bg=PANEL, fg=color,
+                         font=("Noto Sans CJK SC", 14, "bold")).pack(side="left")
+                tk.Label(heading, textvariable=self.count_vars[side], bg=PANEL, fg=TEXT,
+                         font=("Noto Sans CJK SC", 16, "bold")).pack(side="right")
+                details = tk.Frame(card, bg=PANEL); details.pack(fill="x", padx=18)
+                tk.Label(details, textvariable=self.subcount_vars[side], bg=PANEL, fg=MUTED,
+                         font=("Noto Sans CJK SC", 10)).pack(side="left")
+                tk.Label(details, textvariable=self.storage_vars[side], bg=PANEL, fg="#79cfe8",
+                         font=("Noto Sans Mono CJK SC", 9)).pack(side="right")
+            else:
+                tk.Label(card, text=title, bg=PANEL, fg=color, font=("Noto Sans CJK SC", 15, "bold")).pack(anchor="w", padx=18, pady=(8, 2))
+                tk.Label(card, textvariable=self.count_vars[side], bg=PANEL, fg=TEXT,
+                         font=("Noto Sans CJK SC", 19, "bold")).pack(anchor="w", padx=24)
+                tk.Label(card, textvariable=self.subcount_vars[side], bg=PANEL, fg=MUTED,
+                         font=("Noto Sans CJK SC", 11)).pack(anchor="w", padx=30)
+                tk.Label(card, textvariable=self.storage_vars[side], bg=PANEL, fg="#79cfe8",
+                         font=("Noto Sans Mono CJK SC", 10)).pack(anchor="w", padx=30, pady=(2, 0))
+            controls = tk.Frame(card, bg=PANEL); controls.pack(fill="x", padx=12, pady=2 if compact else 3)
             choices = (("left_lock", "保持左臂及夹爪"),
                        ("left_master_align", "主臂自动对齐并恢复左臂跟随"),
                        ("left_master_pause", "停止主臂对齐"),
                        ("left_align_pause", "停止从臂对齐")) if side == "left" else (
                 ("right_save", "保存主从起始位"), ("right_return", "主从一起回位"),
                 ("right_pause", "停止双端回位"), ("right_master_align", "主臂自动对齐并恢复右臂跟随"), ("right_master_pause", "停止右主臂对齐"))
+            button_columns = 3 if compact and side == "right" else 2
             for index, (command, label) in enumerate(choices):
-                controls.grid_columnconfigure(index % 2, weight=1)
+                controls.grid_columnconfigure(index % button_columns, weight=1)
                 button = tk.Button(controls, text=label, command=lambda name=command: self.on_motion(name),
-                    bg="#34434c", fg="white", font=("Noto Sans CJK SC", 11), pady=5)
-                button.grid(row=index // 2, column=index % 2, sticky="ew", padx=3, pady=2)
+                    bg="#34434c", fg="white", font=("Noto Sans CJK SC", 11), pady=3 if compact else 5)
+                button.grid(row=index // button_columns, column=index % button_columns,
+                            sticky="ew", padx=3, pady=1 if compact else 2)
                 self.motion_buttons[command] = button
             tk.Label(card, textvariable=self.motion_vars[side], bg=PANEL, fg="#79cfe8",
                      font=("Noto Sans CJK SC", 10), wraplength=650).pack(fill="x", padx=15)
@@ -1008,7 +1024,7 @@ class MushroomCollectionApp:
             arm_name = "左" if side == "left" else "右"
             tk.Checkbutton(card, text=f"我已通过遥操将{arm_name}从臂调至 READY", variable=ready,
                            bg=PANEL, fg=TEXT, selectcolor="#263238", activebackground=PANEL,
-                           activeforeground=TEXT, font=("Noto Sans CJK SC", 10)).pack(anchor="w", padx=21, pady=(4, 1))
+                           activeforeground=TEXT, font=("Noto Sans CJK SC", 10)).pack(anchor="w", padx=21, pady=(2 if compact else 4, 1))
             if side == "right":
                 tk.Checkbutton(card, text="右腕目标框内只有一朵明确待采蘑菇", variable=self.target_confirmed,
                                bg=PANEL, fg=TEXT, selectcolor="#263238", activebackground=PANEL,
@@ -1016,9 +1032,10 @@ class MushroomCollectionApp:
             button = tk.Button(card, text=f"开始录制{arm_name}臂第 0001 条", command=lambda value=side: self.on_start(value),
                                bg=color, fg="#071009", activebackground=color, font=("Noto Sans CJK SC", 12, "bold"),
                                relief="flat", pady=5)
-            button.pack(fill="x", padx=21, pady=(4, 7)); setattr(self, "start_" + side + "_button", button)
+            button.pack(fill="x", padx=21, pady=(3 if compact else 4, 5 if compact else 7)); setattr(self, "start_" + side + "_button", button)
 
-        footer = tk.Frame(self.root, bg=PANEL, height=112, highlightbackground=BORDER, highlightthickness=1)
+        footer = tk.Frame(self.root, bg=PANEL, height=96 if compact else 112,
+                          highlightbackground=BORDER, highlightthickness=1)
         footer.pack(fill="x", padx=24, pady=(0, 10)); footer.pack_propagate(False)
         tk.Label(footer, textvariable=self.message_var, bg=PANEL, fg="#5be1e6",
                  font=("Noto Sans CJK SC", 10)).pack(fill="x", padx=18, pady=(6, 4))
