@@ -68,6 +68,63 @@ def state(flags=9, **updates):
     values.update(updates)
     return SimpleNamespace(**values)
 
+def test_static_hold_latches_local_pose_and_gripper_once(gateway):
+    gateway.axes[:8] = [.01, .02, .03, .4, .05, .06, .07, -.3]
+    expected = gateway.axes[:8]
+    gateway.publish_return(state(17))
+    gateway.axes[:8] = [.2]*8
+    gateway.left_collection_ack = 1
+    gateway.publish_return(state(17))
+    assert gateway.left_return_pub.messages == [expected, expected]
+    assert not gateway.return_pub.messages
+
+
+def test_static_hold_and_right_return_are_independent(gateway):
+    gateway.publish_return(state(17))
+    gateway.left_collection_ack = 1
+    packet = state(23)
+    gateway.publish_return(packet)
+    assert gateway.return_pub.messages == [list(packet.leader_return_target)]
+    assert gateway.left_return_pub.messages == [[0.]*8, [0.]*8]
+
+
+def test_static_hold_fault_never_restarts_old_target(gateway):
+    gateway.publish_return(state(17))
+    gateway.left_collection_ack = 1
+    gateway.publish_return(state(17))
+    gateway.left_collection_ack = 2
+    gateway.publish_return(state(17))
+    gateway.left_collection_ack = 0
+    gateway.publish_return(state(17))
+    assert len(gateway.left_return_pub.messages) == 2
+    gateway.publish_return(state(1))
+    assert gateway.left_return_pub.messages[-1] == []
+    assert gateway.left_static_target is None
+
+
+def test_failed_static_hold_still_allows_right_release(gateway):
+    gateway.publish_return(state(17))
+    gateway.left_collection_ack = 1
+    gateway.collection_ack = 1
+    gateway.publish_return(state(23))
+    gateway.left_collection_ack = 2
+    gateway.collection_ack = 2
+    gateway.publish_return(state(23))
+    gateway.publish_return(state(19))
+    assert gateway.return_pub.messages[-1] == []
+    assert len(gateway.return_pub.messages) == 2  # target, then explicit release
+
+
+@pytest.mark.parametrize('updates', [
+    {'fault_bits': 1}, {'control_state': SimpleNamespace(name='HOLD')},
+    {'obs_timestamp_ns': 0}])
+def test_bad_state_neither_engages_nor_releases_static_hold(gateway, updates):
+    gateway.publish_return(state(17, **updates))
+    assert not gateway.left_return_pub.messages
+    gateway.publish_return(state(17))
+    gateway.publish_return(state(1, **updates))
+    assert gateway.left_return_pub.messages == [[0.]*8]
+
 
 def feedback(side, *, mode=0, omit=(), nonfinite=None):
     fields = {f"openarm_{side}_joint{i}": .01 * i for i in range(1, 8)}

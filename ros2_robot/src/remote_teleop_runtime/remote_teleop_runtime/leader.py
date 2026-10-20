@@ -15,6 +15,7 @@ from sensor_msgs.msg import JointState
 from remote_teleop_protocol import ActionCommand, FollowerState, PacketError, decode_message, encode_action
 from remote_teleop_protocol.protocol import (
     COLLECTION_ACK_LEFT_CAPABLE, COLLECTION_ACK_LEFT_SHIFT, COLLECTION_STATE_FLAGS,
+    COLLECTION_ACK_STATIC_HOLD_CAPABLE,
 )
 from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
                      haptic_desired_axes, gripper_contact_reference,
@@ -46,6 +47,9 @@ class LeaderGateway(Node):
         self.state_rx = 0.0
         self.return_requested = False
         self.left_return_requested = False
+        self.left_static_target = None
+        self.left_static_ack_seen = False
+        self.left_static_failed = False
         self.lock = threading.Lock()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", STATE_PORT))
@@ -166,6 +170,7 @@ class LeaderGateway(Node):
         ack = self.collection_ack
         if self.enable_left and self.left_collection_ack is not None:
             ack |= COLLECTION_ACK_LEFT_CAPABLE | (self.left_collection_ack << COLLECTION_ACK_LEFT_SHIFT)
+            ack |= COLLECTION_ACK_STATIC_HOLD_CAPABLE
         return ack
 
     def publish_return(self, state):
@@ -188,8 +193,39 @@ class LeaderGateway(Node):
                 return
             right_ack, left_ack = self.collection_ack, self.left_collection_ack
             left_mode_invalid = self.left_collection_mode_invalid
+            local_left = tuple(self.axes[:8]) if flags & 16 else ()
+        static_hold = bool(flags & 16)
+        static_target = getattr(self, "left_static_target", None)
+        static_valid = True
+        if static_hold:
+            if getattr(self, "left_static_ack_seen", False) and left_ack != 1:
+                self.left_static_failed = True
+            static_valid = not (not self.enable_left or self.left_return_pub is None
+                    or left_ack not in (0, 1) or self.left_return_requested
+                    or getattr(self, "left_static_failed", False))
+            if static_valid and static_target is None:
+                if left_ack != 0 or not all(math.isfinite(v) for v in local_left):
+                    return  # Never adopt a different, already active servo.
+                self.left_static_target = static_target = local_left
+            if static_valid and left_ack == 1:
+                self.left_static_ack_seen = True
+            if static_valid:
+                message = JointState()
+                message.position = list(static_target)
+                self.left_return_pub.publish(message)
+            # A failed left hold still permits explicit right-servo release,
+            # but must not refresh a right trajectory.
+        elif static_target is not None:
+            # Explicit withdrawal only. Timeout never releases a held arm.
+            self.left_return_pub.publish(JointState())
+            if left_ack == 0:
+                self.left_static_target = None
+                self.left_static_ack_seen = self.left_static_failed = False
+            return  # Do not start a trajectory in the same release packet.
         requested_right, requested_left = bool(flags & 4), bool(flags & 8)
         if requested_right or requested_left:
+            if not static_valid:
+                return
             try:
                 target = [float(value) for value in state.leader_return_target]
             except (TypeError, ValueError, OverflowError):
@@ -203,7 +239,7 @@ class LeaderGateway(Node):
                 publisher = self.left_return_pub
                 self.left_return_requested = True
             else:
-                if (right_ack not in (0, 1) or left_ack not in (None, 0) or
+                if (right_ack not in (0, 1) or (left_ack not in (None, 0) and not static_hold) or
                     left_mode_invalid or self.left_return_requested):
                     return
                 publisher = self.return_pub
@@ -218,7 +254,7 @@ class LeaderGateway(Node):
             self.return_pub.publish(JointState())
             self.return_requested = False
         if (self.enable_left and self.left_return_pub is not None and
-            left_ack is not None and (self.left_return_requested or left_ack)):
+            not static_hold and left_ack is not None and (self.left_return_requested or left_ack)):
             self.left_return_pub.publish(JointState())
             self.left_return_requested = False
 

@@ -174,13 +174,13 @@ verify_runtime_builds() {
   # Both running Python overlays must understand the independent left/right
   # servo acknowledgements before any homing or motor startup is attempted.
   local left_master_check
-  left_master_check='from remote_teleop_protocol.protocol import decode_collection_ack, COLLECTION_STATE_FLAGS; from remote_teleop_runtime.collection_motion import COMMANDS; from remote_teleop_runtime.leader import LeaderGateway; from remote_teleop_runtime.follower import FollowerGateway; assert decode_collection_ack(16) == (0, 0); assert 9 in COLLECTION_STATE_FLAGS; assert "left_master_align" in COMMANDS; assert hasattr(LeaderGateway, "collection_acknowledgement")'
+  left_master_check='from remote_teleop_protocol.protocol import decode_collection_ack, COLLECTION_STATE_FLAGS; from remote_teleop_runtime.collection_motion import COMMANDS; from remote_teleop_runtime.leader import LeaderGateway; from remote_teleop_runtime.follower import FollowerGateway; assert decode_collection_ack(48) == (0, 0); assert {9, 17, 19, 23}.issubset(COLLECTION_STATE_FLAGS); assert {"left_master_align", "left_lock_both", "left_hold_release"}.issubset(COMMANDS); assert hasattr(LeaderGateway, "collection_acknowledgement")'
   /usr/bin/python3 -c "$left_master_check" || {
-    echo 'ERROR: 主机实际 Python overlay 缺少左主臂对齐协议；尚未开始归位。' >&2
+    echo 'ERROR: 主机实际 Python overlay 缺少双端保持协议；请更新 remote_teleop_protocol/runtime。尚未开始归位。' >&2
     return 1
   }
   ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash' && source '$JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash' && /usr/bin/python3 -c '$left_master_check'" || {
-    echo 'ERROR: Jetson 实际 Python overlay 缺少左主臂对齐协议；尚未开始归位。' >&2
+    echo 'ERROR: 从臂主机实际 Python overlay 缺少双端保持协议；请更新 remote_teleop_protocol/runtime。尚未开始归位。' >&2
     return 1
   }
   # The dedicated I/O worker requires correlated watchdog replies. Check the

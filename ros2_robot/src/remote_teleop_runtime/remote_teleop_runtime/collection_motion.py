@@ -9,7 +9,7 @@ import math
 import os
 from pathlib import Path
 import time
-from remote_teleop_protocol.protocol import decode_collection_ack, PacketError
+from remote_teleop_protocol.protocol import decode_collection_ack, PacketError, COLLECTION_ACK_STATIC_HOLD_CAPABLE
 
 
 # Match the right-arm xacro/controller J2 +pi/2 offset.
@@ -17,6 +17,7 @@ LIMITS = [(-1.396263, 3.490659), (-1.745329+math.pi/2, 1.745329+math.pi/2),
           (-1.570796, 1.570796), (0.0, 2.443461), (-1.570796, 1.570796),
           (-0.785398, 0.785398), (-1.570796, 1.570796), (-1.0472, 0.0)]
 COMMANDS = {"left_lock", "left_follow", "left_align_follow", "left_align_pause",
+            "left_lock_both", "left_hold_release",
             "left_master_align", "left_master_pause", "right_save", "right_return",
             "right_pause", "right_follow", "right_master_align", "right_master_pause", "collection_begin", "collection_end"}
 # Saved-pose return only. Startup homing and normal FOLLOW limits are separate.
@@ -70,6 +71,10 @@ class CollectionMotion:
         self.left_align_detail = {}
         self.collection_ack = 0
         self.left_master_target = None
+        self.left_static_hold = False
+        self.left_static_phase = "idle"
+        self.left_static_started = 0.0
+        self.left_static_free_since = None
         self.left_master_align_active = False
         self.left_master_align_phase = "idle"
         self.left_master_align_detail = {}
@@ -108,7 +113,39 @@ class CollectionMotion:
     def flags(self):
         return ((1 if self.left is not None else 0) | (2 if self.right is not None else 0)
                 | (4 if self.leader_target is not None else 0)
-                | (8 if self.left_master_target is not None else 0))
+                | (8 if self.left_master_target is not None else 0)
+                | (16 if self.left_static_hold else 0))
+
+    def _static_hold_confirmed(self):
+        return (self.left_static_hold and self.left_static_phase == "held"
+                and self._collection_modes()[1] == 1
+                and bool(self.collection_ack & COLLECTION_ACK_STATIC_HOLD_CAPABLE))
+
+    def _left_safe_for_right(self):
+        return ((self.left_static_phase == "idle" and self._collection_modes()[1] in (None, 0))
+                or self._static_hold_confirmed())
+
+    def _update_static_hold(self, now):
+        ack = self._collection_modes()[1]
+        if self.left_static_phase == "preparing":
+            if ack == 1:
+                self.left_static_phase = "held"
+                self.note = "左主臂、左从臂及夹爪均已进入电机保持"
+            elif ack != 0 or now-self.left_static_started > 2.0:
+                self.left_static_phase = "failed"
+                self.note = "左主臂保持未确认；从臂保持，请检查并显式解除主臂保持"
+        elif self.left_static_phase == "held" and not self._static_hold_confirmed():
+            self.left_static_phase = "failed"
+            self.note = "左主臂保持确认丢失；请检查，不能自动恢复"
+        elif self.left_static_phase == "releasing":
+            if ack == 0:
+                if self.left_static_free_since is None:
+                    self.left_static_free_since = now
+                if now-self.left_static_free_since >= .1:
+                    self.left_static_phase = "idle"
+                    self.note = "左主臂保持已解除；左从臂及夹爪继续保持，请对齐后恢复跟随"
+            else:
+                self.left_static_free_since = None
 
     @property
     def leader_servo_target(self):
@@ -121,6 +158,9 @@ class CollectionMotion:
             return 3, None  # Never turn an unknown peer into an idle servo.
 
     def interrupt(self, actual, reason):
+        if self.left_static_phase in {"preparing", "held"}:
+            self.left_static_phase = "failed"
+            self.note = reason + "；左主臂保持不可确认，需显式解除；从臂继续保持"
         if self.right_master_align_active and self.right_master_align_phase != "failed":
             self._fail_right_master(reason + "；右主臂轨迹已停止，从臂继续保持", self.leader_now)
         if self.left_master_align_active and self.left_master_align_phase != "failed":
@@ -154,6 +194,10 @@ class CollectionMotion:
         right_ack, left_ack = self._collection_modes()
         return {
             "left_mode": "HOLD" if self.left is not None else "FOLLOW",
+            "left_static_hold_supported": bool(self.collection_ack & COLLECTION_ACK_STATIC_HOLD_CAPABLE),
+            "left_static_hold_requested": self.left_static_hold,
+            "left_static_hold_phase": self.left_static_phase,
+            "left_static_hold_confirmed": self._static_hold_confirmed(),
             "right_mode": "RETURNING" if self.returning else "HOLD" if self.right is not None else "FOLLOW",
             "saved": self.saved, "note": self.note, "recording": self.recording,
             "return_phase": self.phase,
@@ -544,7 +588,7 @@ class CollectionMotion:
             raise ValueError("请先保持左右从臂及夹爪")
         if (self.returning or self.leader_target is not None or self.left_master_target is not None
                 or self.left_master_align_active or self.left_align_active
-                or any(self.transition.values()) or left_ack != 0):
+                or any(self.transition.values()) or not self._left_safe_for_right()):
             raise ValueError("已有回位、伺服或跟随切换；请先完成或停止")
         goal, master, measured = pose(self.right), pose(leader[8:16]), pose(actual[8:16])
         for label, values in (("从臂保持目标", goal), ("主臂当前位置", master)):
@@ -589,7 +633,7 @@ class CollectionMotion:
                 result = self.right_master_release_result
                 self.right_master_align_active = False
                 self.right_master_pause_requested = False
-                if result == "completed" and left_ack == 0 and distance(master, self.right) <= .06:
+                if result == "completed" and self._left_safe_for_right() and distance(master, self.right) <= .06:
                     self.transition["right"] = list(self.right)
                     self.right = None
                     self.phase = "idle"
@@ -607,7 +651,7 @@ class CollectionMotion:
                 # Keep explicit release pending; never reacquire an old target.
                 self.right_master_align_detail["message"] = "尚未确认右主臂伺服释放；从臂保持，继续等待或检查控制状态"
             return
-        if left_ack != 0:
+        if not self._left_safe_for_right() and phase != "stopping":
             self._fail_right_master("左主臂伺服状态冲突；右轨迹停止，从臂保持", leader)
             return
         if phase not in {"stopping"} and follower_drift > .10:
@@ -687,6 +731,8 @@ class CollectionMotion:
         self.leader_now = tuple(leader)
         if leader_ack is not None:
             self.collection_ack = leader_ack
+        if name == "left_master_pause" and self.left_static_phase != "idle":
+            name = "left_hold_release"
         if name == "collection_end":
             if self.recording and self.recording["token"] != request.get("token"):
                 raise ValueError("录制锁不属于本条 episode")
@@ -712,7 +758,10 @@ class CollectionMotion:
                     raise ValueError("正在录制或封装，请先结束本条数据")
                 if (self.left_master_align_active or self.left_master_target is not None
                         or self.left_align_active or any(self.transition.values())
-                        or left_ack not in (None, 0) or right_ack not in (0, 1, 2)):
+                        or (not self._left_safe_for_right() and not (
+                            self.left_static_hold and self.left_static_phase == "failed"
+                            and left_ack in (1, 2)))
+                        or right_ack not in (0, 1, 2)):
                     raise ValueError("运动切换或主臂伺服状态不明，不能解除右主臂回位伺服")
                 if self.leader_target is None and right_ack == 0:
                     return  # Already free; never relatch or start another wait.
@@ -748,6 +797,25 @@ class CollectionMotion:
             if name == "collection_begin" and request.get("token") == self.recording["token"]:
                 return
             raise ValueError("正在录制或封装，请先结束本条数据")
+        if name == "left_hold_release":
+            if self.left_static_phase == "idle":
+                return
+            if (self.returning or self.right_master_align_active or self.leader_target is not None
+                    or self._collection_modes()[0] != 0):
+                raise ValueError("请先结束右主臂运动并确认释放，再解除左主臂保持")
+            if self.left_static_phase != "releasing":
+                self.left_static_hold = False
+                self.left_static_phase = "releasing"
+                self.left_static_free_since = None
+                self.note = "正在解除左主臂保持；左从臂和夹爪继续保持"
+            return
+        if name == "left_lock_both" and self.left_static_phase != "idle":
+            return  # Duplicate requests never relatch a displaced pose.
+        if self.left_static_phase != "idle":
+            if name in {"left_follow", "left_master_align", "left_align_follow", "left_master_pause", "left_lock"}:
+                raise ValueError("请先显式解除左主臂保持并等待确认")
+            if not self._static_hold_confirmed():
+                raise ValueError("左主臂保持尚未确认，请先处理保持状态")
         if self.right_master_align_active:
             if name == "right_master_align" and self.right_master_align_phase != "failed":
                 return
@@ -763,7 +831,7 @@ class CollectionMotion:
             self._start_left_master(actual, leader, now)
             return
         if (name in {"right_return", "right_follow", "right_save", "left_follow", "left_align_follow", "collection_begin"}
-                and (self._collection_modes()[1] not in (None, 0) or self._collection_modes()[0] == 3)):
+                and (not self._left_safe_for_right() or self._collection_modes()[0] == 3)):
             raise ValueError("左主臂伺服尚未释放，禁止切换其他运动")
         if self.left_align_active:
             if name == "left_align_follow":
@@ -787,7 +855,17 @@ class CollectionMotion:
                     raise ValueError("右臂尚未到达保存的起始位（允许误差 0.07 rad）")
             self.recording = {"side": side, "token": request["token"]}
             return
-        if name == "left_lock":
+        if name in {"left_lock", "left_lock_both"}:
+            if name == "left_lock_both":
+                if not self.collection_ack & COLLECTION_ACK_STATIC_HOLD_CAPABLE:
+                    raise ValueError("当前主臂网关不支持双端保持，需要更新并重启")
+                if (self._collection_modes() != (0, 0) or self.returning
+                        or self.leader_target is not None or self.left_master_target is not None
+                        or any(self.transition.values())):
+                    raise ValueError("请先完成运动切换，确认主臂伺服已释放")
+                self.left_static_hold = True
+                self.left_static_phase = "preparing"
+                self.left_static_started = now
             if self.left is None:
                 self.left = pose(applied[:8])
                 self.transition["left"] = None
@@ -795,7 +873,8 @@ class CollectionMotion:
             self.left_align_detail = {}
             self.left_master_align_phase = "idle"
             self.left_master_align_detail = {}
-            self.note = "左臂姿态与夹爪目标已保持，可松开左主臂"
+            self.note = ("左从臂及夹爪目标已保持，等待左主臂保持确认"
+                         if name == "left_lock_both" else "左从臂及夹爪目标已保持；左主臂仍可移动")
         elif name in {"left_follow", "right_follow"}:
             side = name.split("_")[0]; offset = 0 if side == "left" else 8
             target = getattr(self, side)
@@ -887,13 +966,17 @@ class CollectionMotion:
                 result[8:16] = self.right
             return result
         result = list(requested)
+        self._update_static_hold(now)
         if self.right_master_align_active:
             self._update_right_master(actual, requested, self.leader_now, now)
         if self.left_master_align_active:
             self._update_left_master(actual, requested, self.leader_now, now)
         if self.left_align_active:
             self._update_left_alignment(actual, self.leader_now, now)
-        if self.returning and left_ack not in (None, 0):
+        releasing_right_after_static_fault = (
+            self.right_servo_release_pending and self.left_static_hold
+            and self.left_static_phase == "failed" and left_ack in (1, 2))
+        if self.returning and not self._left_safe_for_right() and not releasing_right_after_static_fault:
             self.interrupt(actual, "左主臂伺服状态冲突，右回位已停止")
         leader_ack = right_ack  # Old right-return state machine retains its 0/1/2 meaning.
         if self.returning and self.phase == "resetting":

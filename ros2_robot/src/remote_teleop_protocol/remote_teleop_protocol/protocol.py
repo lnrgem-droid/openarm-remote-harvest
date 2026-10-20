@@ -25,10 +25,16 @@ MAX_DATAGRAM_SIZE = 1200
 COLLECTION_ACK_LEFT_CAPABLE = 0x10
 COLLECTION_ACK_RIGHT_MASK = 0x03
 COLLECTION_ACK_LEFT_SHIFT = 2
+COLLECTION_ACK_STATIC_HOLD_CAPABLE = 0x20
 COLLECTION_ACK_VALUES = (0, 1, 2) + tuple(
     COLLECTION_ACK_LEFT_CAPABLE | (left << COLLECTION_ACK_LEFT_SHIFT) | right
     for left in (0, 1, 2) for right in (0, 1, 2))
 COLLECTION_STATE_FLAGS = (0, 1, 2, 3, 6, 7, 9, 11)
+# A stationary left-master hold latches locally, leaving the target payload
+# available for right-master return. It always includes left-follower HOLD.
+COLLECTION_ACK_VALUES += tuple(value | COLLECTION_ACK_STATIC_HOLD_CAPABLE
+                              for value in COLLECTION_ACK_VALUES if value & COLLECTION_ACK_LEFT_CAPABLE)
+COLLECTION_STATE_FLAGS += (17, 19, 23)
 
 # magic, version, type, flags, session, sequence, sender monotonic time,
 # payload length, crc32. CRC is calculated with the crc field set to zero.
