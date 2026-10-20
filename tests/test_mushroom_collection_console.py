@@ -153,6 +153,74 @@ def right_master_ready_status():
 
 
 class ConsoleSimulationTest(unittest.TestCase):
+    def test_reopened_window_restores_verified_stop_and_new_session_clears_it(self):
+        self.app.teleop.value["teleop_ready"] = False
+        self.app.lifecycle_status.events.put({"event": "complete", "stopped": True,
+            "leader_session_id": 11, "message": "已停止"})
+        self.app._tick_once()
+        self.assertTrue(self.app.power_down_succeeded)
+        self.assertIn("已停止", self.app.status_var.get())
+        self.app.teleop.value.update(teleop_ready=True, leader_session_id=12)
+        self.app._tick_once()
+        self.assertFalse(self.app.power_down_succeeded)
+        self.assertFalse(self.app.power_down_locked)
+
+    def test_late_stop_probe_cannot_overwrite_an_operator_start(self):
+        self.app.lifecycle_action_taken = self.app.teleop_start_busy = True
+        self.app.lifecycle_status.events.put({"event": "complete", "stopped": True,
+            "leader_session_id": 11, "message": "已停止"})
+        self.app._tick_once()
+        self.assertFalse(self.app.power_down_succeeded)
+        self.assertIn("启动中", self.app.status_var.get())
+
+    def test_start_cancel_has_no_effect_and_running_start_is_disabled(self):
+        self.app._tick_once()
+        self.assertEqual(self.app.teleop_start_button.cget("text"), "遥操运行中")
+        self.assertEqual(self.app.teleop_start_button.cget("state"), "disabled")
+        calls = []
+        self.app.teleop_start.start = lambda: calls.append("start") or True
+        self.app.on_start_teleop()
+        self.assertEqual(calls, [])
+        self.app.teleop.value["teleop_ready"] = False
+        with patch.object(ui.messagebox, "askyesno", return_value=False):
+            self.app.on_start_teleop()
+        self.assertEqual(calls, [])
+
+    def test_start_waits_for_save_then_locks_controls_until_verified(self):
+        self.app.teleop.value["teleop_ready"] = False
+        self.app.control.value.update(running=True, phase="recording")
+        calls = []
+        self.app.teleop_start.start = lambda: calls.append("start") or True
+        self.app.on_start_teleop()
+        self.assertEqual(calls, [])
+        self.app.control.value.update(running=False, phase="idle")
+        self.app.power_down_succeeded = self.app.power_down_locked = True
+        self.app.on_start_teleop()
+        self.app.on_start_teleop()
+        self.assertEqual(calls, ["start"])
+        self.assertFalse(self.app.power_down_succeeded)
+        self.assertNotIn("已确认失能", self.app.power_down_message)
+        self.app._tick_once()
+        self.assertEqual(self.app.close_button.cget("state"), "disabled")
+        self.assertEqual(self.app.power_down_button.cget("state"), "disabled")
+        self.app.teleop_start.events.put({"event": "complete", "ok": True, "message": "已核验"})
+        self.app._tick_once()
+        self.assertFalse(self.app.teleop_start_busy)
+        self.assertFalse(self.app.power_down_succeeded)
+        self.assertFalse(self.app.power_down_locked)
+        self.assertFalse(self.app.left_ready.get())
+
+    def test_failed_start_never_claims_disabled_and_allows_stop(self):
+        self.app.teleop_start_busy = self.app.power_down_locked = True
+        self.app.power_down_succeeded = True
+        self.app.teleop_start.events.put({"event": "complete", "ok": False, "message": "启动超时"})
+        self.app._tick_once()
+        self.assertFalse(self.app.power_down_succeeded)
+        self.assertTrue(self.app.power_down_locked)
+        self.assertTrue(self.app.teleop_start_failed)
+        self.assertEqual(self.app.power_down_button.cget("state"), "normal")
+        self.assertIn("启动超时", self.app.lifecycle_message.get())
+
     def test_dual_hold_button_routes_only_when_capability_is_present(self):
         self.app.teleop.value = master_ready_status()
         self.app.teleop.value['collection']['left_static_hold_supported'] = True
@@ -925,6 +993,9 @@ class ConsoleSimulationTest(unittest.TestCase):
                     self.assertFalse(self.app.close_requested)
 
     def setUp(self) -> None:
+        status_probe = patch.object(ui.TeleopStatusClient, "start", return_value=True)
+        status_probe.start()
+        self.addCleanup(status_probe.stop)
         ui.SessionControl = FakeControl
         ui.PreviewReceiver = FakePreview
         ui.TeleopMonitor = FakeTeleop

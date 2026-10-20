@@ -844,6 +844,9 @@ with tempfile.TemporaryDirectory(prefix="oa_ui_status_") as temporary:
 
 class PowerDownClient:
     """Read coordinator progress off the Tk thread; never access robot hardware here."""
+    script_name = "power_down_arms.py"
+    timeout_s = 150
+    operation_flag = "--confirm"
 
     def __init__(self, args):
         self.args = args
@@ -861,11 +864,12 @@ class PowerDownClient:
         process = None
         completed = False
         try:
-            command = ["/usr/bin/python3", str(_teleop_root / "scripts/power_down_arms.py"),
-                       "--confirm", "--jetson", self.args.jetson_ssh,
+            command = ["/usr/bin/python3", str(_teleop_root / "scripts" / self.script_name),
+                       self.operation_flag, "--jetson", self.args.jetson_ssh,
+                       "--profile", getattr(self.args, "teleop_profile", "jetson"),
                        "--recorder", f"tcp://{self.args.jetson}:{self.args.record_port}"]
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            deadline = time.monotonic() + 150
+            deadline = time.monotonic() + self.timeout_s
             buffer = b""
             detail = ""
             while time.monotonic() < deadline:
@@ -886,7 +890,7 @@ class PowerDownClient:
                         self.events.put(event)
                         completed = completed or event["event"] == "complete"
             if not completed:
-                raise RuntimeError("下电结果未确认（进程退出或超时），不会自动恢复运动。" + detail)
+                raise RuntimeError("操作结果未确认（进程退出或超时），不会自动重试。" + detail)
         except Exception as exc:
             self.events.put({"event": "complete", "ok": False, "message": str(exc)})
         finally:
@@ -901,6 +905,16 @@ class PowerDownClient:
             self.pending = False
 
 
+class TeleopStartClient(PowerDownClient):
+    script_name = "start_teleop_from_console.py"
+    timeout_s = 300
+
+
+class TeleopStatusClient(TeleopStartClient):
+    operation_flag = "--status"
+    timeout_s = 30
+
+
 class MushroomCollectionApp:
     def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
         self.root = root; self.args = args
@@ -908,6 +922,14 @@ class MushroomCollectionApp:
         self.preview = PreviewReceiver(f"tcp://{args.jetson}:{args.preview_port}")
         self.teleop = TeleopMonitor(args.jetson_ssh)
         self.power_down = PowerDownClient(args)
+        self.teleop_start = TeleopStartClient(args)
+        self.teleop_start_busy = False
+        self.teleop_start_confirming = False
+        self.teleop_start_failed = False
+        self.lifecycle_status = TeleopStatusClient(args)
+        self.lifecycle_action_taken = False
+        self.stopped_session = None
+        self.lifecycle_message = tk.StringVar(value="正在读取遥操状态…")
         self.power_down_busy = False
         self.power_down_locked = False
         self.power_down_confirming = False
@@ -951,6 +973,7 @@ class MushroomCollectionApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
         self.root.bind("<Escape>", self.on_ignored_key); self.root.bind("q", self.on_ignored_key); self.root.bind("Q", self.on_ignored_key)
         self.preview.start(); self.teleop.start(); self.control.request("status")
+        self.lifecycle_status.start()
         self.root.after(50, self.tick)
         if args.automated_smoke_test:
             self.smoke_phase = 0; self.smoke_started = time.monotonic(); self.root.after(500, self.smoke_tick)
@@ -961,21 +984,28 @@ class MushroomCollectionApp:
         height = min(1100, max(680, self.root.winfo_screenheight() - 75))
         compact = width >= 1600 and height >= 900
         self.root.geometry(f"{width}x{height}"); self.root.minsize(1100, 680); self.root.configure(bg=BG)
-        top = tk.Frame(self.root, bg=BG, height=52); top.pack(fill="x", padx=14, pady=(7, 3)); top.pack_propagate(False)
+        top = tk.Frame(self.root, bg=BG, height=88); top.pack(fill="x", padx=14, pady=(7, 3)); top.pack_propagate(False)
         top.grid_columnconfigure(1, weight=1)
         tk.Label(top, text="OpenArm｜蘑菇采摘 RGB-D 数据采集控制台", bg=BG, fg=TEXT,
                  font=("Noto Sans CJK SC", 17, "bold")).grid(row=0, column=0, sticky="w", padx=6, pady=7)
         self.teleop_status_label = tk.Label(top, textvariable=self.status_var, bg=BG, fg="#79d65a",
                                             font=("Noto Sans CJK SC", 10), anchor="center")
-        self.teleop_status_label.grid(row=0, column=1, sticky="ew", padx=10)
-        self.close_button = tk.Button(top, text="结束本次采集会话", command=self.on_close_session,
+        self.teleop_status_label.grid(row=0, column=1, columnspan=4, sticky="ew", padx=10)
+        tk.Label(top, textvariable=self.lifecycle_message, bg=BG, fg=TEXT,
+                 anchor="w", font=("Noto Sans CJK SC", 10)).grid(
+                     row=1, column=0, columnspan=2, sticky="ew", padx=6)
+        self.teleop_start_button = tk.Button(top, text="开始主从遥操…", command=self.on_start_teleop,
+            bg="#217e49", fg="white", font=("Noto Sans CJK SC", 10, "bold"),
+            relief="flat", padx=12)
+        self.teleop_start_button.grid(row=1, column=2, sticky="e", padx=6, pady=3)
+        self.close_button = tk.Button(top, text="结束采集并退出界面", command=self.on_close_session,
                                       bg="#3b4449", fg="white", activebackground="#56636a",
                                       font=("Noto Sans CJK SC", 10, "bold"), relief="flat", padx=12)
-        self.close_button.grid(row=0, column=2, sticky="e", padx=6, pady=7)
-        self.power_down_button = tk.Button(top, text="机械臂下电…", command=self.on_power_down,
+        self.close_button.grid(row=1, column=4, sticky="e", padx=6, pady=3)
+        self.power_down_button = tk.Button(top, text="停止遥操并失能…", command=self.on_power_down,
             bg="#933a35", fg="white", activebackground="#b74a42",
             font=("Noto Sans CJK SC", 10, "bold"), relief="flat", padx=12)
-        self.power_down_button.grid(row=0, column=3, sticky="e", padx=6, pady=7)
+        self.power_down_button.grid(row=1, column=3, sticky="e", padx=6, pady=3)
 
         cameras = tk.Frame(self.root, bg=BG); cameras.pack(fill="both", expand=True, padx=18, pady=4)
         for column in range(3): cameras.grid_columnconfigure(column, weight=1, uniform="camera")
@@ -1076,7 +1106,7 @@ class MushroomCollectionApp:
 
     def on_start(self, side: str) -> None:
         if self.power_down_locked or self.power_down_confirming:
-            self.set_notice("下电流程中或机械臂已下电；恢复使用请重新通过桌面启动器启动。")
+            self.set_notice("遥操操作尚未完成或电机已失能；停止完成后，请点击“开始主从遥操…”恢复使用。")
             return
         state, _, pending = self.control.snapshot()
         if pending:
@@ -1150,7 +1180,7 @@ class MushroomCollectionApp:
             self.set_notice("手动对齐入口已移除，请使用“主臂自动对齐并恢复左臂跟随”。")
             return
         if self.power_down_locked or self.power_down_confirming:
-            self.set_notice("下电流程已锁定姿态操作，不会自动恢复运动。")
+            self.set_notice("遥操启停流程已锁定姿态操作，不会自动恢复运动。")
             return
         teleop = self.teleop.snapshot()
         collection = teleop.get('collection') or {}
@@ -1387,7 +1417,7 @@ class MushroomCollectionApp:
             recording, _, pending = self.control.snapshot()
         reason = None
         if self.power_down_locked or self.power_down_confirming:
-            reason = "下电流程已锁定操作，不能恢复跟随。"
+            reason = "遥操启停流程已锁定操作，不能恢复跟随。"
         elif recording.get("running") or pending:
             reason = "请先结束并保存本条数据，再恢复左臂跟随。"
         elif self.master_alignment_busy(teleop):
@@ -1492,8 +1522,11 @@ class MushroomCollectionApp:
         self.control.request("episode_stop", result="aborted", failure_code="operator_safe_end")
 
     def on_close_session(self) -> None:
+        if self.teleop_start_busy or self.teleop_start_confirming:
+            self.set_notice("正在启动遥操，请等待结果后退出。")
+            return
         if self.power_down_busy or self.power_down_confirming:
-            self.set_notice("正在处理机械臂下电，请等待结果后关闭。")
+            self.set_notice("正在停止遥操并失能，请等待结果后关闭。")
             return
         teleop = self.teleop.snapshot()
         if not self.power_down_succeeded and self.right_master_alignment_busy(teleop):
@@ -1526,8 +1559,11 @@ class MushroomCollectionApp:
         self.close_requested = self.control.request("session_close")
 
     def on_window_close(self) -> None:
+        if self.teleop_start_busy or self.teleop_start_confirming:
+            self.set_notice("正在启动遥操，请等待结果后退出。")
+            return
         if self.power_down_busy or self.power_down_confirming:
-            self.set_notice("正在处理机械臂下电，请等待结果后关闭。")
+            self.set_notice("正在停止遥操并失能，请等待结果后关闭。")
             return
         teleop = self.teleop.snapshot()
         if not self.power_down_succeeded and self.right_master_alignment_busy(teleop):
@@ -1548,6 +1584,11 @@ class MushroomCollectionApp:
             self.set_notice("正在停止右臂回位，确认保持后再关闭窗口。")
             return
         state, _, _ = self.control.snapshot()
+        if (not self.power_down_succeeded and not state.get("running")
+                and not self.args.automated_smoke_test and not messagebox.askyesno(
+                    "退出采集界面", "关闭窗口不会停止遥操，机械臂可能仍会跟随。\n"
+                    "收工请先取消，点击“停止遥操并失能…”。\n是否仅关闭界面？")):
+            return
         if state.get("running"):
             if not messagebox.askyesno("本条尚未保存", "关闭窗口会把当前条标记为中止并封口，遥操继续运行。是否关闭？"):
                 return
@@ -1561,13 +1602,13 @@ class MushroomCollectionApp:
 
     def confirm_power_down(self):
         dialog = tk.Toplevel(self.root)
-        dialog.title("确认机械臂下电")
+        dialog.title("确认停止遥操并失能")
         dialog.transient(self.root); dialog.resizable(False, False)
         dialog.configure(bg=PANEL)
         confirmed = {"value": False}
         text = ("主从四臂及夹爪将失去驱动力。\n请先放下夹持物、安置并支撑好四臂。\n\n"
                 "正在录制的本条将中止并保存；已在封装的条目保留原结果。\n"
-                "只有保存完成后才执行失能。Jetson 保持开机。\n"
+                "只有保存完成后才执行失能。两端电脑保持开机。\n"
                 "本操作停止电机出力，硬件电源仍需手动关闭。")
         tk.Label(dialog, text=text, justify="left", bg=PANEL, fg=TEXT,
                  font=("Noto Sans CJK SC", 12), padx=24, pady=20).pack()
@@ -1577,7 +1618,7 @@ class MushroomCollectionApp:
             dialog.destroy()
         cancel = tk.Button(buttons, text="取消", command=dialog.destroy, width=14)
         cancel.pack(side="left", padx=8)
-        tk.Button(buttons, text="确认下电", command=accept, width=14,
+        tk.Button(buttons, text="确认停止并失能", command=accept, width=18,
                   bg="#933a35", fg="white").pack(side="right", padx=8)
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
@@ -1586,12 +1627,15 @@ class MushroomCollectionApp:
         return confirmed["value"]
 
     def on_power_down(self):
+        if self.teleop_start_busy or self.teleop_start_confirming:
+            self.set_notice("遥操正在启动，请等待结果；紧急情况使用现场硬件急停。")
+            return
         if (self.power_down_busy or self.power_down_confirming or self.power_down_succeeded
                 or self.power_down.pending or self.close_requested):
             return
         _, _, pending = self.control.snapshot()
         if pending or getattr(self.teleop, "pending", False):
-            self.set_notice("请等待当前操作回复后再下电。")
+            self.set_notice("请等待当前操作回复后再停止遥操并失能。")
             return
         self.power_down_confirming = True
         try:
@@ -1601,12 +1645,13 @@ class MushroomCollectionApp:
         if not confirmed:
             return
         self.power_down_busy = True
+        self.lifecycle_action_taken = True
         self.power_down_locked = True
         self.power_down_message = "正在确认录制状态…"
         self.power_down_detail.set("保存数据 → 停止跟随 → 主从电机失能 → 核验结果\n" + self.power_down_message)
         if self.power_down_dialog is None or not self.power_down_dialog.winfo_exists():
             self.power_down_dialog = tk.Toplevel(self.root)
-            self.power_down_dialog.title("机械臂下电进度")
+            self.power_down_dialog.title("停止遥操并失能进度")
             self.power_down_dialog.transient(self.root)
             self.power_down_dialog.configure(bg=PANEL)
             tk.Label(self.power_down_dialog, textvariable=self.power_down_detail,
@@ -1617,7 +1662,7 @@ class MushroomCollectionApp:
         self.power_down_dialog.lift()
         if not self.power_down.start():
             self.power_down_busy = False
-            self.power_down_message = "已有下电操作正在执行，请等待结果。"
+            self.power_down_message = "已有停止并失能操作正在执行，请等待结果。"
 
     def close_power_down_dialog(self):
         if not self.power_down_busy and self.power_down_dialog is not None:
@@ -1630,18 +1675,86 @@ class MushroomCollectionApp:
                 event = self.power_down.events.get_nowait()
                 if event["event"] == "device_result":
                     continue  # The final result below includes both endpoints.
-                self.power_down_message = event.get("message", "下电结果未知")
+                self.power_down_message = event.get("message", "停止并失能结果未知")
                 detail = self.power_down_message
                 if event["event"] == "complete":
                     self.power_down_busy = False
                     self.power_down_succeeded = event.get("ok") is True
-                    for side, label in (("host", "主机主臂"), ("follower", "Jetson 从臂")):
+                    if self.power_down_succeeded:
+                        try:
+                            self.stopped_session = json.loads((Path.home() /
+                                ".local/state/openarm/last-power-down.json").read_text())["leader_session_id"]
+                        except (OSError, ValueError, KeyError):
+                            self.stopped_session = None
+                    for side, label in (("host", "主端双臂"), ("follower", "从端双臂")):
                         report = event.get("devices", {}).get(side, {})
                         text = "已确认失能" if report.get("ok") and report.get("verified") else report.get("error") or "未确认失能"
                         detail += f"\n{label}：{text}"
                     if not self.power_down_succeeded:
-                        detail += "\n不会自动使能或归位。处理问题后可再次点击“机械臂下电…”重试。"
+                        detail += "\n不会自动使能或归位。处理问题后可再次点击“停止遥操并失能…”重试。"
+                    self.lifecycle_message.set("遥操已停止 · 32/32 电机已确认失能" if self.power_down_succeeded
+                                               else "停止未完成 · 失能未完全确认，请查看详情")
                 self.power_down_detail.set("保存数据 → 停止跟随 → 主从电机失能 → 核验结果\n" + detail)
+        except queue.Empty:
+            pass
+
+    def on_start_teleop(self):
+        state, _, pending = self.control.snapshot()
+        if (self.teleop_start_busy or self.teleop_start_confirming or self.power_down_busy
+                or self.power_down_confirming or self.teleop_start.pending
+                or self.power_down.pending or self.close_requested or pending
+                or getattr(self.teleop, "pending", False)):
+            self.set_notice("请等待当前操作完成。")
+            return
+        if state.get("running") or state.get("phase") != "idle":
+            self.set_notice("请先保存当前条目并等待录制器空闲，再启动遥操。")
+            return
+        if self.teleop.snapshot().get("teleop_ready") and not self.power_down_succeeded:
+            self.set_notice("主从遥操已经运行，无需重复启动。")
+            return
+        self.teleop_start_confirming = True
+        try:
+            confirmed = messagebox.askyesno("开始主从遥操",
+                "本操作会使能主从四臂，并可能自动归位、对齐。\n"
+                "请确认：无夹持物，四臂运动路径无人且无障碍，急停可用且有人监护。\n"
+                "停止后的重新启动也会重新检查、归位和对齐。\n\n是否开始？")
+        finally:
+            self.teleop_start_confirming = False
+        if not confirmed:
+            return
+        self.teleop_start_busy = True
+        self.lifecycle_action_taken = True
+        self.teleop_start_failed = False
+        self.power_down_locked = True
+        self.power_down_succeeded = False
+        self.power_down_message = "正在启动遥操 · 电机可能使能和运动，请等待核验。"
+        self.close_power_down_dialog()
+        self.lifecycle_message.set(self.power_down_message)
+        if not self.teleop_start.start():
+            self.teleop_start_busy = False
+            self.teleop_start_failed = True
+            self.lifecycle_message.set("启动请求未提交，请查看状态")
+
+    def poll_teleop_start(self):
+        try:
+            while True:
+                event = self.teleop_start.events.get_nowait()
+                self.lifecycle_message.set(event.get("message", "启动结果未知"))
+                self.power_down_message = event.get("message", "启动结果未知")
+                if event["event"] == "complete":
+                    self.teleop_start_busy = False
+                    success = event.get("ok") is True
+                    self.teleop_start_failed = not success
+                    # Even a failed start may have enabled some motors.
+                    self.power_down_succeeded = False
+                    self.power_down_locked = not success
+                    if success:
+                        self.power_down_message = ""
+                        self.left_ready.set(False)
+                        self.right_ready.set(False)
+                        self.target_confirmed.set(False)
+                        self.close_power_down_dialog()
+                    self.set_notice(event.get("message", "启动结果未知"), 20)
         except queue.Empty:
             pass
 
@@ -1664,6 +1777,20 @@ class MushroomCollectionApp:
             self.power_down_busy or self.power_down_confirming or self.power_down_succeeded
             or self.power_down.pending or pending or getattr(self.teleop, "pending", False)
             or self.close_requested) else "normal")
+        teleop_running = bool(self.teleop.snapshot().get("teleop_ready")) and not self.power_down_succeeded
+        starting = self.teleop_start_busy or self.teleop_start_confirming
+        self.teleop_start_button.configure(
+            text="正在启动…" if starting else ("遥操运行中" if teleop_running else "开始主从遥操…"),
+            state="disabled" if (starting or teleop_running or running or pending or self.power_down_busy
+                or self.power_down_confirming or self.power_down.pending
+                or self.close_requested or getattr(self.teleop, "pending", False)) else "normal")
+        if not (starting or self.teleop_start_failed or self.power_down_locked):
+            self.lifecycle_message.set("遥操运行中 · 仅 FOLLOW 手臂跟随" if teleop_running
+                                       else "遥操未就绪 · 开始前会检查现有状态")
+        if starting:
+            for button in (self.power_down_button, self.close_button, self.start_left_button,
+                           self.start_right_button, *self.motion_buttons.values()):
+                button.configure(state="disabled")
         if self.power_down_locked or self.power_down_confirming:
             for button in (self.start_left_button, self.start_right_button, *self.motion_buttons.values()):
                 button.configure(state="disabled")
@@ -1673,6 +1800,24 @@ class MushroomCollectionApp:
                 button.configure(state="disabled")
 
     def _tick_once(self) -> None:
+        try:
+            while True:
+                result = self.lifecycle_status.events.get_nowait()
+                if (result.get("event") == "complete" and result.get("stopped") is True
+                        and not self.lifecycle_action_taken):
+                    self.power_down_succeeded = self.power_down_locked = True
+                    self.stopped_session = result.get("leader_session_id")
+                    self.power_down_message = result["message"]
+                    self.lifecycle_message.set(result["message"])
+        except queue.Empty:
+            pass
+        current = self.teleop.snapshot()
+        if (self.power_down_succeeded and current.get("teleop_ready")
+                and self.stopped_session is not None
+                and current.get("leader_session_id") not in (None, self.stopped_session)):
+            self.power_down_succeeded = self.power_down_locked = False
+            self.power_down_message = ""
+        self.poll_teleop_start()
         self.poll_power_down()
         if hasattr(self.teleop, "results"):
             try:
@@ -1921,8 +2066,11 @@ class MushroomCollectionApp:
             "stopping": "正在封装",
             "error": "录制异常",
         }.get(phase, "未录制")
+        display_state = ("启动中" if self.teleop_start_busy else
+                         "已停止 · 电机已失能" if self.power_down_succeeded else
+                         teleop.get('state', 'CHECKING'))
         self.status_var.set(
-            f"遥操 {teleop.get('state', 'CHECKING')}　｜　相机 {camera_text}　｜　"
+            f"遥操 {display_state}　｜　相机 {camera_text}　｜　"
             f"磁盘 {free_gb} GB　｜　{recording_label}"
         )
         # Teleoperation diagnostics never choose an episode result. The
@@ -2035,6 +2183,8 @@ def main() -> None:
     parser.add_argument("--jetson-ssh", default="openarm-jetson")
     parser.add_argument("--preview-port", type=int, default=5556)
     parser.add_argument("--record-port", type=int, default=5557)
+    parser.add_argument("--teleop-profile", choices=("jetson", "host-test"),
+                        default=os.environ.get("OPENARM_TELEOP_PROFILE", "jetson"))
     parser.add_argument("--automated-smoke-test", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     root = tk.Tk()
