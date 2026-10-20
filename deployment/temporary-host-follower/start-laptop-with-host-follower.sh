@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Temporary arrangement for testing without Jetson. This launcher homes and
-# enables all four arms after its on-screen physical safety gate.
+# Temporary arrangement for testing without Jetson. Open the console only;
+# enabling and homing require the explicit start button in the console.
 set -euo pipefail
 
 export JETSON_HOST=openarm-follower-test
@@ -17,10 +17,8 @@ export OPENARM_COLLECTION_CONSOLE_EXTRA_ARGS='--jetson-ssh openarm-follower-test
 export OPENARM_TELEOP_SERVICE=openarm-host-test-teleop.service
 export OPENARM_TELEOP_SERVICE_SOURCE=/home/openarm/openarm-transfer/openarm-host-test-teleop.service
 
-echo '当前配置：笔记本主臂 can0/can1 → 旧主机从臂 can0/can1、三台相机。'
-echo '启动后四条机械臂将自动归位并使能，然后才能采图。'
-echo '请确认四臂运动范围无人和无障碍物、无夹持物、急停可用且有人现场监护。'
-read -r -p '符合上述条件时输入“启动”，其他输入取消：' confirmation
-[[ "$confirmation" == 启动 ]] || { echo '已取消，机械臂未使能。'; exit 2; }
+export OPENARM_TELEOP_PROFILE=host-test
 
+echo '当前配置：笔记本主臂 → 旧主机从臂、三台相机。'
+echo '只打开采集界面；需要运动时，请在界面点击“开始主从遥操…”并确认。'
 exec /usr/bin/bash /home/openarm/dev/openarm-remote-harvest/scripts/daily_start_teleop_rgbd.sh

@@ -1,0 +1,25 @@
+{
+  "remote-control": {
+    "commit": "f1a536ce83603a42efc615f3ec5c69f00d918f20",
+    "sha256": "4842910af624c7b5644285916a341435590b913781af98e46bca71456f9ee331",
+    "files": [
+      "ros2_robot/src/remote_teleop_protocol",
+      "ros2_robot/src/remote_teleop_runtime",
+      "ros2_robot/src/openarm_gravity_pd_control",
+      "scripts",
+      "desktop",
+      "tests"
+    ],
+    "bytes": 13761874
+  },
+  "rgbd-capture": {
+    "commit": "691dc6b444ce3ff30b67ceaf0158751a85bc7bea",
+    "sha256": "304a9e4e9d3cf2a6c69204d844fea650da188349ee575b2b18494a57a4609480",
+    "files": [
+      "scripts",
+      "config",
+      "tests"
+    ],
+    "bytes": 13662123
+  }
+}

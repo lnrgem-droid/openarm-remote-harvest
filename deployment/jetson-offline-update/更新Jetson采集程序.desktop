@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=更新Jetson采集程序
+Comment=离线更新原Jetson，备份并编译；不会启动遥操或归位
+Exec=/home/openarm/openarm-transfer/jetson-update-20261020/open-update-terminal.sh
+Terminal=false
+Categories=Utility;

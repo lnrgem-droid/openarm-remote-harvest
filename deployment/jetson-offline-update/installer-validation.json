@@ -1,0 +1,18 @@
+{
+  "checks": {
+    "unit_tests_passed": 17,
+    "native_build_x86_64": "passed",
+    "staged_import_and_ldd": "passed",
+    "mirrored_existing_overlay_activation": "passed",
+    "jetson_aarch64_install": "not tested: Jetson unavailable"
+  },
+  "files": {
+    "install_on_jetson.py": "bf94e941374638d50ce28241de917384bf726aea3d0a9b6d06d7c50d71c0f32c",
+    "run_update_job.py": "89b9df46fe38eb3334d2dd900c285d547a26da086f9eadc10098ef8ffeecc1e7",
+    "update-jetson.py": "63c950a900e3eb201621ab0ee31c2f66634e544bffd61aa8bb4143de27010853",
+    "open-update-terminal.sh": "470dbe4054aca45e33c3d53bf29089e90515ae5937702cf39df448c9f3580e76",
+    "更新Jetson采集程序.desktop": "155a810acfde0278ed3f2d558644a71907fa4fa412a6eb349563ecdf13e0403b",
+    "一键更新使用说明.txt": "6fe5bb0bcca0d81791d6b4b276ada26822ac9bebdfa7f7f84388aae3f3b7b757",
+    "test_installer.py": "9cecab78490b6cd8530bbc7cad44a668859586fd931fe0e5a584819cbdce2148"
+  }
+}

@@ -2,7 +2,7 @@
 Version=1.0
 Type=Application
 Name=启动临时主从采集测试（笔记本主臂＋旧主机从臂）
-Comment=今天的临时双机采集测试；启动前须确认四臂归位路径安全
+Comment=打开临时采集界面；点击开始主从遥操后才使能、归位和对齐
 Exec=/home/openarm/openarm-transfer/run-laptop-with-host-follower-terminal.sh
 Terminal=false
 Categories=Utility;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=现场Jetson连接检查
+Comment=只读检查网络与版本，不使能机械臂
+Exec=gnome-terminal --title=OpenArm现场只读检查 -- bash -c "python3 /home/openarm/openarm-transfer/field-ready-20261020/check-jetson-field.py; read -r -p '检查结束，按回车关闭'"
+Terminal=false
+Categories=Utility;
