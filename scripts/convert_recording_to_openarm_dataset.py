@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import warnings
 from bisect import bisect_left
 from pathlib import Path
 
@@ -30,6 +31,24 @@ import yaml
 ROLES = ("left_wrist", "right_wrist", "chest")
 CAMERA_NAMES = {"left_wrist": "wrist_left", "right_wrist": "wrist_right", "chest": "chest"}
 JOINTS = [f"joint{i}" for i in range(1, 8)] + ["gripper"]
+
+
+def recording_time_origin(source: Path, camera_times: dict[str, list[int]]) -> tuple[int, str]:
+    """Use the clock anchor that belongs to the recorded robot timestamps."""
+    info_path = source / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.exists() else {}
+    if "started_unix_ns" in info:
+        origin = info["started_unix_ns"]
+        if type(origin) is not int or origin <= 0:
+            raise ValueError("meta/info.json started_unix_ns must be a positive integer")
+        return origin, "meta/info.json:started_unix_ns"
+    if info.get("format") == "openarm_rgbd_staging_v1":
+        raise ValueError("staging recording is missing meta/info.json started_unix_ns")
+    # Older LeRobot recordings have no absolute robot clock anchor. Keep the
+    # historical approximation explicit; never silently replace a broken anchor.
+    warnings.warn("Legacy recording has no robot time origin; using first camera "
+                  "timestamp as an approximation.", RuntimeWarning, stacklevel=2)
+    return min(values[0] for values in camera_times.values()), "first_aligned_camera_host_realtime_ns"
 
 
 def read_camera_index(source: Path, role: str) -> list[dict]:
@@ -113,11 +132,7 @@ def main() -> None:
 
     indexes = {role: read_camera_index(source, role) for role in ROLES}
     times = {role: [int(item["host_realtime_ns"]) for item in indexes[role]] for role in ROLES}
-    # LeRobot timestamps are relative.  For recordings made before an explicit
-    # robot absolute-time sidecar exists, use the first RGB-D frame as t=0 and
-    # record this assumption in the report; later recordings can provide a
-    # validated constant correction with --camera-time-offset-ms.
-    origin_ns = min(times[role][0] for role in ROLES)
+    origin_ns, origin_source = recording_time_origin(source, times)
     offset_ns = int(args.camera_time_offset_ms * 1_000_000)
 
     target_ns = [origin_ns + int(float(row["timestamp"]) * 1_000_000_000) + offset_ns for row in rows]
@@ -164,7 +179,10 @@ def main() -> None:
         "schema_version": 1,
         "source_recording": str(source),
         "depth_storage": "source depth_raw/*.u16le with matching JSONL indexes; unmodified",
-        "rgb_time_anchor": "first_aligned_camera_host_realtime_ns + LeRobot relative timestamp + camera_time_offset_ms",
+        "rgb_time_anchor": f"{origin_source} + LeRobot relative timestamp + camera_time_offset_ms",
+        "robot_time_origin_ns": origin_ns,
+        "robot_time_origin_source": origin_source,
+        "time_origin_is_approximate": origin_source == "first_aligned_camera_host_realtime_ns",
         "camera_time_offset_ms": args.camera_time_offset_ms,
         "max_camera_skew_ms": args.max_camera_skew_ms,
         "frames": len(rows),

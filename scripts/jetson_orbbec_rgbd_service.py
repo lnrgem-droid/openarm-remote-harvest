@@ -29,6 +29,16 @@ class CameraSpec:
     serial: str
 
 
+def depth_in_millimeters(raw: np.ndarray, sensor_scale_mm: float) -> tuple[np.ndarray, dict]:
+    """Describe the converted payload separately from the sensor's native units."""
+    scale = float(sensor_scale_mm)
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("sensor depth scale must be positive and finite")
+    depth = np.rint(raw.astype(np.float32) * scale).clip(0, 65535).astype(np.uint16)[..., None]
+    return depth, {"depth_scale_mm_per_unit": 1.0,
+                   "source_depth_scale_mm_per_unit": scale}
+
+
 class OrbbecCamera:
     def __init__(self, spec: CameraSpec, width: int, height: int, fps: int):
         self.spec, self.width, self.height, self.fps = spec, width, height, fps
@@ -77,10 +87,9 @@ class OrbbecCamera:
                     if not rgb or not dep: continue
                     rgb_np = np.frombuffer(rgb.get_data(), np.uint8).reshape(rgb.get_height(), rgb.get_width(), 3).copy()
                     raw = np.frombuffer(dep.get_data(), np.uint16).reshape(dep.get_height(), dep.get_width())
-                    depth_mm = np.rint(raw.astype(np.float32) * dep.get_depth_scale()).clip(0, 65535).astype(np.uint16)[..., None]
+                    depth_mm, depth_units = depth_in_millimeters(raw, dep.get_depth_scale())
                     if rgb_np.shape[:2] != depth_mm.shape[:2]:
                         self.dropped += 1; continue
-                    depth_scale_mm = float(dep.get_depth_scale())
                     header = {"schema_version": 1, "role": self.spec.role, "frame_sequence": self.count,
                               "width": int(rgb_np.shape[1]), "height": int(rgb_np.shape[0]),
                               "aligned_depth_to_rgb": True, "rgb_device_timestamp_us": int(rgb.get_timestamp_us()),
@@ -88,7 +97,7 @@ class OrbbecCamera:
                               "host_monotonic_ns": time.monotonic_ns(), "host_realtime_ns": time.time_ns(),
                               "rgb_format": "rgb8", "depth_unit": "mm", "rgb_dtype": "uint8", "depth_dtype": "uint16",
                               "rgb_stride_bytes": int(rgb_np.strides[0]), "depth_stride_bytes": int(depth_mm.strides[0]),
-                              "depth_scale_mm_per_unit": depth_scale_mm,
+                              **depth_units,
                               "rgb_depth_pair_delta_us": abs(int(rgb.get_timestamp_us()) - int(dep.get_timestamp_us()))}
                     with self.lock: self.latest = (header, rgb_np, depth_mm)
                     self.count += 1
