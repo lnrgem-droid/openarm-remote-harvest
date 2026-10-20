@@ -411,7 +411,10 @@ void ArmController::executeControlStep(const std::vector<double> * direct_target
       const bool failed = collectionTrackingFailed(
         collection_target_, q_act,
         gripper_position / GRIPPER_OPEN_M * params_.gripper_max_rad,
-        std::chrono::duration<double>(now-collection_time_).count());
+        // The callback can refresh collection_time_ after the cycle's `now`
+        // was sampled. The timestamp overload samples the clock here while
+        // collection_mutex_ is held, so a fresh command cannot have negative age.
+        collection_time_);
       if (failed && !collection_fault_) {
         collection_fault_ = true;
         collection_target_ = q_act;

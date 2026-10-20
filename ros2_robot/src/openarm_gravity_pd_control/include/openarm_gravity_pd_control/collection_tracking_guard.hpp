@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <chrono>
 #include <vector>
 
 namespace openarm_gravity_pd_control {
@@ -20,6 +21,17 @@ inline bool collectionTrackingFailed(const std::vector<double> & target,
         std::abs(target[i] - measured) > 0.20) return true;
   }
   return false;
+}
+
+// Call while holding the same lock that protects received_at. Sampling here
+// avoids comparing a new callback timestamp with an older control-cycle time.
+inline bool collectionTrackingFailed(const std::vector<double> & target,
+                                     const std::vector<double> & actual,
+                                     double gripper_rad,
+                                     std::chrono::steady_clock::time_point received_at)
+{
+  return collectionTrackingFailed(target, actual, gripper_rad,
+    std::chrono::duration<double>(std::chrono::steady_clock::now()-received_at).count());
 }
 
 }  // namespace openarm_gravity_pd_control
