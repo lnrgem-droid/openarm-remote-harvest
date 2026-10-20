@@ -44,6 +44,8 @@ def _start_control_stack(context):
              parameters=[os.path.join(pd_share, "config", "control_params.yaml"),
                          os.path.join(rt_share, "config", "bimanual_follower.yaml"),
                          {"urdf_path": urdf, "joint_limits_path": limits,
+                          "right_arm_can": LaunchConfiguration("right_arm_can"),
+                          "left_arm_can": LaunchConfiguration("left_arm_can"),
                           "startup_tracking_assist_enabled": LaunchConfiguration("tracking_candidate"),
                           "tracking_assist_enabled": LaunchConfiguration("tracking_candidate"),
                           "startup_use_tracking_gains": LaunchConfiguration("tracking_candidate"),
@@ -81,5 +83,9 @@ def generate_launch_description():
             description="Opt-in simulation-tested bounded tracking correction"),
         DeclareLaunchArgument("startup_home", default_value="true",
             description="Explicitly move both follower arms to existing encoder q=0 at startup"),
+        DeclareLaunchArgument("right_arm_can", default_value="can1",
+            description="Right follower CAN interface; old desktop test uses can0"),
+        DeclareLaunchArgument("left_arm_can", default_value="can2",
+            description="Left follower CAN interface; old desktop test uses can1"),
         OpaqueFunction(function=_launch_actions),
     ])

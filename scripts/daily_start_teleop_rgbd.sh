@@ -16,13 +16,18 @@ COLLECTION_CONSOLE_EXTRA_ARGS="${OPENARM_COLLECTION_CONSOLE_EXTRA_ARGS:-}"
 COLLECTION_PYTHON="${OPENARM_COLLECTION_PYTHON:-/home/openarm/miniconda3/bin/python}"
 JETSON_HOST="${JETSON_HOST:-openarm-jetson}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
+JETSON_ROOT="${JETSON_ROOT:-/home/nvidia/dev/openarm-remote-harvest}"
+FOLLOWER_RIGHT_CAN="${FOLLOWER_RIGHT_CAN:-can1}"
+FOLLOWER_LEFT_CAN="${FOLLOWER_LEFT_CAN:-can2}"
+RECORDER_PYTHON="${OPENARM_RECORDER_PYTHON:-/home/nvidia/miniconda3/envs/lerobot/bin/python}"
+TEST_HOST_MODE="${OPENARM_TEST_HOST_MODE:-false}"
 LOG_DIR="/tmp/openarm-daily-start"
 HOST_CAN_SETUP="$TELEOP_ROOT/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
-JETSON_CAN_SETUP="/home/nvidia/openarm_robot/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan"
+JETSON_CAN_SETUP="${OPENARM_REMOTE_CAN_SETUP:-/home/nvidia/openarm_robot/ros2_robot/install/openarm_can/bin/openarm-can-configure-socketcan}"
 START_LOCK="/tmp/openarm-daily-teleop.lock"
 TELEOP_CORE="$TELEOP_ROOT/scripts/run_bimanual_remote_feedback.sh"
-TELEOP_SERVICE="openarm-remote-teleop.service"
-TELEOP_SERVICE_SOURCE="$TELEOP_ROOT/scripts/systemd/$TELEOP_SERVICE"
+TELEOP_SERVICE="${OPENARM_TELEOP_SERVICE:-openarm-remote-teleop.service}"
+TELEOP_SERVICE_SOURCE="${OPENARM_TELEOP_SERVICE_SOURCE:-$TELEOP_ROOT/scripts/systemd/$TELEOP_SERVICE}"
 TELEOP_SERVICE_DEST="$HOME/.config/systemd/user/$TELEOP_SERVICE"
 mkdir -p "$LOG_DIR"
 
@@ -35,7 +40,7 @@ fi
 say() { printf '\n=== %s ===\n' "$*"; }
 
 teleop_status() {
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && ros2 run remote_teleop_runtime remote-teleop-control status" 2>/dev/null || true
+  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control status" 2>/dev/null || true
 }
 
 status_is_healthy_running() {
@@ -136,15 +141,19 @@ ensure_host_can() {
 }
 
 ensure_jetson_can() {
-  if ssh "$JETSON_HOST" "ip link show can1 2>/dev/null | grep -q 'state UP' && ip link show can2 2>/dev/null | grep -q 'state UP'"; then
-    ssh "$JETSON_HOST" 'ip -brief link show can1; ip -brief link show can2'
+  if ssh "$JETSON_HOST" "ip link show '$FOLLOWER_RIGHT_CAN' 2>/dev/null | grep -q 'state UP' && ip link show '$FOLLOWER_LEFT_CAN' 2>/dev/null | grep -q 'state UP'"; then
+    ssh "$JETSON_HOST" "ip -brief link show '$FOLLOWER_RIGHT_CAN'; ip -brief link show '$FOLLOWER_LEFT_CAN'"
     return
   fi
-  echo "Jetson can1/can2 未启用，正在配置 CAN FD（可能要求输入 Jetson sudo 密码）…"
-  ssh -tt "$JETSON_HOST" "$JETSON_CAN_SETUP can1 -fd -b 1000000 -d 5000000 && $JETSON_CAN_SETUP can2 -fd -b 1000000 -d 5000000"
+  echo "$JETSON_HOST $FOLLOWER_RIGHT_CAN/$FOLLOWER_LEFT_CAN 未启用，正在配置 CAN FD（可能要求输入远端 sudo 密码）…"
+  ssh -tt "$JETSON_HOST" "$JETSON_CAN_SETUP $FOLLOWER_RIGHT_CAN -fd -b 1000000 -d 5000000 && $JETSON_CAN_SETUP $FOLLOWER_LEFT_CAN -fd -b 1000000 -d 5000000"
 }
 
 ensure_jetson_rgbd_services() {
+  if [[ "$TEST_HOST_MODE" == true ]]; then
+    ssh "$JETSON_HOST" 'bash /home/openarm/openarm_robot/prepare-host-capture-services.sh'
+    return
+  fi
   ssh "$JETSON_HOST" 'set -e
 runtime=/home/nvidia/openarm-rgbd-runtime
 root=/home/nvidia/dev/openarm-rgbd-preview
@@ -221,19 +230,19 @@ test -S /tmp/openarm_rgbd_raw.ipc'
 
 stop_recording_on_exit() {
   # Closing the preview window must not leave a hidden recording running.
-  ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"' || true
+  ssh "$JETSON_HOST" "$RECORDER_PYTHON -" <<'PY' || true
 import zmq
 c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.SNDTIMEO, 2000); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557")
 s.send_json({"command":"status"}); status=s.recv_json()
 if status.get("running"):
     s.close(0); c.term(); c=zmq.Context(); s=c.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.SNDTIMEO, 2000); s.setsockopt(zmq.RCVTIMEO, 2000); s.connect("tcp://127.0.0.1:5557"); s.send_json({"command":"stop"}); print(s.recv_json())
-PY'
+PY
 }
 
 ensure_recording_idle() {
   # A previous UI crash must not make a newly opened window look as if it
   # started recording by itself.  Finish any orphaned recorder first.
-  ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python - <<'"'"'PY'"'"'
+  ssh "$JETSON_HOST" "$RECORDER_PYTHON -" <<'PY'
 import time, zmq
 endpoint = "tcp://127.0.0.1:5557"
 def request(command):
@@ -258,7 +267,7 @@ if status.get("running"):
 if status.get("running"):
     raise SystemExit("ERROR: 遗留录制未能停止，请查看 Jetson 录制日志")
 print("录制状态：未录制（等待界面按钮）")
-PY'
+PY
 }
 
 ensure_teleop_service() {
@@ -293,7 +302,7 @@ echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_COR
 # FAULT.  A regular unit has atomic, repeatable restart semantics.
 ensure_teleop_service
 status="$(teleop_status)"
-motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST")" || true
+motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST" --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN")" || true
 motors_enabled=false
 recover_power_cycle=false
 if /usr/bin/python3 -c 'import json,sys; sys.exit(json.load(sys.stdin).get("result") != "ENABLED")' <<<"$motor_report"; then
@@ -311,7 +320,7 @@ elif /usr/bin/python3 "$TELEOP_ROOT/scripts/check_power_cycle_recovery.py" <<<"[
   fi
   case "$confirmation" in r|R|恢复) ;; *) echo '已取消恢复，不驱动机械臂。'; exit 2 ;; esac
   # A separate recorder may still be saving even if the control lock is clear.
-  if ! ssh "$JETSON_HOST" '/home/nvidia/miniconda3/envs/lerobot/bin/python -' <<'PY'
+  if ! ssh "$JETSON_HOST" "$RECORDER_PYTHON -" <<'PY'
 import zmq
 context = zmq.Context()
 socket = context.socket(zmq.REQ)
@@ -334,7 +343,7 @@ PY
   fi
   # Recheck after the countdown and recorder query; never use stale approval.
   status="$(teleop_status)"
-  motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST")" || true
+  motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST" --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN")" || true
   if ! /usr/bin/python3 "$TELEOP_ROOT/scripts/check_power_cycle_recovery.py" <<<"[$status,$motor_report]"; then
     echo 'ERROR: 确认期间状态发生变化，本次不重新归位。' >&2
     exit 2

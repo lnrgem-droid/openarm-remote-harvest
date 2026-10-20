@@ -70,7 +70,7 @@ def summarize(observations, interfaces, now):
         result = 'DISABLED'
     else:
         result = 'MIXED'
-    return {'result': result, 'motors': motors}
+    return {'result': result, 'interfaces': list(interfaces), 'motors': motors}
 
 
 def probe(interfaces):
@@ -106,7 +106,7 @@ def probe(interfaces):
                         (received, state))
         return summarize(observations, interfaces, time.monotonic())
     except OSError as exc:
-        return {'result': 'UNKNOWN', 'error': str(exc)}
+        return {'result': 'UNKNOWN', 'interfaces': list(interfaces), 'error': str(exc)}
     finally:
         for sock in sockets:
             sock.close()
@@ -123,6 +123,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--interfaces', nargs='+', default=['can0', 'can1'])
     parser.add_argument('--jetson')
+    parser.add_argument('--follower-interfaces', nargs=2, default=['can1', 'can2'])
     args = parser.parse_args()
     report = probe(args.interfaces)
     if args.jetson:
@@ -131,7 +132,7 @@ def main():
         try:
             remote = subprocess.run(
                 ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-                 args.jetson, '/usr/bin/python3 - --interfaces can1 can2'],
+                 args.jetson, '/usr/bin/python3 - --interfaces ' + ' '.join(args.follower_interfaces)],
                 input=Path(__file__).read_text(), text=True, capture_output=True,
                 timeout=10, check=False)
             follower = json.loads(remote.stdout)

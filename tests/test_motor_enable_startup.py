@@ -132,11 +132,11 @@ class MotorEnableTest(unittest.TestCase):
         # Feed simulated operator input, never access a real controlling TTY.
         branch = branch.replace('</dev/tty', '</dev/stdin')
         branch = branch.replace(
-            '/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST"',
+            '/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST" --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN"',
             'printf "%s" "$MOTOR_FIXTURE"')
         setup = r'''
 set -euo pipefail
-TELEOP_ROOT="$1"; LOG_DIR="$2"; JETSON_HOST=mock; TELEOP_SERVICE=mock
+TELEOP_ROOT="$1"; LOG_DIR="$2"; JETSON_HOST=mock; TELEOP_SERVICE=mock; RECORDER_PYTHON=/usr/bin/python3
 STATUS_FIXTURE="$3"; MOTOR_FIXTURE="$4"
 ensure_teleop_service() { :; }
 say() { printf '%s\n' "$*"; }

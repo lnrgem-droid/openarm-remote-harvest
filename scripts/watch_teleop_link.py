@@ -138,7 +138,7 @@ class HealthMonitor:
             uncertainty_evidence=copy.deepcopy(self.first_uncertain))
 
 
-def collect(peer):
+def collect(peer, follower_interfaces=('can1', 'can2')):
     # One SSH round trip; overlap local and remote passive CAN acquisition.
     # Both status snapshots surround the remote probe to detect session swaps.
     source=Path(__file__).with_name('check_motor_enable.py').read_text()
@@ -151,10 +151,10 @@ def status():
    s.sendto(b'{"command":"status"}',"/tmp/openarm_remote_runtime.sock")
    return json.loads(s.recv(65536))
 before=status()
-motors=namespace['probe'](['can1','can2'])
+motors=namespace['probe'](FOLLOWER_INTERFACES)
 after=status()
 print(json.dumps(dict(before=before,status=after,motors=motors)))
-'''
+'''.replace('FOLLOWER_INTERFACES', repr(list(follower_interfaces)))
     def read_remote():
         r=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=2',peer,
                           '/usr/bin/python3 -'],input=remote,text=True,capture_output=True,timeout=3,check=True)
@@ -185,6 +185,7 @@ print(json.dumps(dict(before=before,status=after,motors=motors)))
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--jetson',default='openarm-jetson');p.add_argument('--output',required=True)
+    p.add_argument('--follower-interfaces', nargs=2, default=['can1', 'can2'])
     p.add_argument('--once',action='store_true')
     p.add_argument('--owner-pid',type=int,help='exit when this control supervisor exits')
     a=p.parse_args()
@@ -210,7 +211,7 @@ def main():
             if owner_identity()!=owner: return
         except OSError: return
         started=time.monotonic_ns()
-        status,motors=collect(a.jetson)
+        status,motors=collect(a.jetson, a.follower_interfaces)
         assessment=monitor.sample(status,motors)
         key,message=assessment['diagnostic'],assessment['message']
         if previous!=key:

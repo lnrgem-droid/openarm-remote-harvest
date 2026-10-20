@@ -19,6 +19,8 @@ ROS_DIR="$ROOT_DIR/ros2_robot"
 JETSON_HOST="${JETSON_HOST:-openarm-jetson}"
 JETSON_ROOT="${JETSON_ROOT:-/home/nvidia/dev/openarm-remote-harvest}"
 PEER_IP="${PEER_IP:-192.168.50.2}"
+FOLLOWER_RIGHT_CAN="${FOLLOWER_RIGHT_CAN:-can1}"
+FOLLOWER_LEFT_CAN="${FOLLOWER_LEFT_CAN:-can2}"
 FORCE_FEEDBACK="${FORCE_FEEDBACK:-true}"
 LOG_DIR="${LOG_DIR:-/tmp/openarm-remote-teleop}"
 JETSON_CONTROL_CPUSET="${JETSON_CONTROL_CPUSET:-0-2}"
@@ -71,6 +73,7 @@ status_is_healthy_running() {
 check_physical_enables() {
   echo '  被动检查主从 32 个电机的真实使能状态…'
   /usr/bin/python3 "$ROOT_DIR/scripts/check_motor_enable.py" --jetson "$JETSON_HOST" \
+    --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN" \
     >"$LOG_DIR/motor-enable-status.json" || {
       echo 'ERROR: 主从电机未全部确认使能，禁止继续自动对齐。' >&2
       cat "$LOG_DIR/motor-enable-status.json" >&2
@@ -268,19 +271,19 @@ show_stage 1 '让旧遥操进入保持，并关闭旧控制进程' \
 remote_control hold >/dev/null 2>&1 || true
 host_pids="$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' || true)"
 if [[ -n "$host_pids" ]]; then kill -INT $host_pids 2>/dev/null || true; fi
-ssh "$JETSON_HOST" "pids=\$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^/home/nvidia/.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' || true); if [[ -n \"\$pids\" ]]; then kill -INT \$pids 2>/dev/null || true; fi"
+ssh "$JETSON_HOST" "pids=\$(pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' || true); if [[ -n \"\$pids\" ]]; then kill -INT \$pids 2>/dev/null || true; fi"
 sleep 3
 if pgrep -f '^/usr/bin/python3 .*/remote-teleop-leader( |$)|^/home/openarm/.*/openarm_gravity_pd_node .*__node:=leader_gravity_pd( |$)' >/dev/null; then
   echo 'ERROR: old host control stack did not stop.' >&2; exit 1
 fi
-if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^/home/nvidia/.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' >/dev/null"; then
+if ssh "$JETSON_HOST" "pgrep -f '^/usr/bin/python3 .*/remote-teleop-follower-watchdog( |$)|^/usr/bin/python3 .*/remote-teleop-follower( |$)|^.*/openarm_gravity_pd_node .*__node:=follower_gravity_pd( |$)' >/dev/null"; then
   echo 'ERROR: old Jetson control stack did not stop.' >&2; exit 1
 fi
 
 show_stage 2 '启动 Jetson 从臂控制，并让左右从臂自动回到初始位' \
   '是；左右从臂会自动运动回初始位' \
   '否' '远离运动范围，不要拖动任何机械臂，随时准备急停'
-ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && source $JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash && source $JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash && exec taskset --cpu-list $JETSON_CONTROL_CPUSET ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true tracking_candidate:=$TRACKING_CANDIDATE' > /tmp/openarm_bimanual_follower.log 2>&1 &"
+ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && source $JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash && source $JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash && exec taskset --cpu-list $JETSON_CONTROL_CPUSET ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true tracking_candidate:=$TRACKING_CANDIDATE right_arm_can:=$FOLLOWER_RIGHT_CAN left_arm_can:=$FOLLOWER_LEFT_CAN' > /tmp/openarm_bimanual_follower.log 2>&1 &"
 
 show_stage 3 '等待左右从臂完成回初始位并进入 ALIGNING' \
   '是；从臂可能仍在缓慢归位' \
@@ -440,6 +443,7 @@ fi
 printf '%s\n' "$PEER_BOOT_ID" >"$LOG_DIR/peer-boot-id"
 printf '%s\n' "$RUN_STATUS" >"$LOG_DIR/run-status.json"
 /usr/bin/python3 "$ROOT_DIR/scripts/watch_teleop_link.py" --jetson "$JETSON_HOST" \
+  --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN" \
   --owner-pid "$$" --output "$LOG_DIR/live-health.json" &
 LINK_MONITOR_PID=$!
 echo '  正在等待本会话的持续电机健康检查，尚不能宣布可遥操…'

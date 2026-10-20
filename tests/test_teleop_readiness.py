@@ -61,6 +61,20 @@ def test_motor_fault_is_not_hidden_by_other_enabled_drives():
     assert '0xC' in motor_health(m)[1]
 
 
+def test_temporary_follower_bus_mapping_requires_all_16_reported_motors():
+    m = motors()
+    m['follower']['interfaces'] = ['can0', 'can1']
+    m['follower']['motors'] = {
+        f'{bus}/{motor}': dict(state=1, states=[1], fresh=True, samples=50)
+        for bus in ('can0', 'can1') for motor in range(1, 9)
+    }
+    assert evaluate(status(), m)['teleop_ready']
+    del m['follower']['motors']['can0/8']
+    assert motor_health(m)[0] == 'MOTOR_UNKNOWN'
+    m['follower']['interfaces'] = ['can0', 'can0']
+    assert motor_health(m)[0] == 'MOTOR_UNKNOWN'
+
+
 def test_missing_entries_and_summary_only_fail_closed():
     for m in (None,{}, {'result':'ENABLED'},[],{'host':None}):
         assert not evaluate(status(),m)['teleop_ready']

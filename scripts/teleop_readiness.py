@@ -6,6 +6,7 @@ Raw controller state is retained separately from permission to operate/record.
 """
 import json
 import math
+import re
 from pathlib import Path
 import time
 
@@ -29,6 +30,13 @@ def motor_health(report):
     for role, buses in (('host', ('can0', 'can1')), ('follower', ('can1', 'can2'))):
         part = report.get(role, {}) if isinstance(report, dict) else {}
         motors = part.get('motors', {}) if isinstance(part, dict) else {}
+        declared = part.get('interfaces') if isinstance(part, dict) else None
+        if declared is not None:
+            if (not isinstance(declared, list) or len(declared) != 2 or
+                not all(isinstance(bus, str) and re.fullmatch(r'can[0-9]+', bus) for bus in declared) or
+                len(set(declared)) != 2):
+                return 'MOTOR_UNKNOWN', f'{role} CAN 接口清单无效'
+            buses = tuple(declared)
         for bus in buses:
             for motor in range(1, 9):
                 key = f'{bus}/{motor}'; label = f'{role}:{key}'
