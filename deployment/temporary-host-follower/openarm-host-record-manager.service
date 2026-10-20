@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenArm temporary host RGB-D recording manager
+
+[Service]
+Type=exec
+CPUAffinity=3 4 5 6 7
+Environment=OPENARM_RGBD_ROOT=/home/openarm/dev/openarm-rgbd-preview
+Environment=OPENARM_RGBD_RUNTIME=/home/openarm/.local/state/openarm-rgbd-host
+Environment=OPENARM_DATASET_ROOT=/home/openarm/datasets
+Environment=LEROBOT_PYTHON=/home/openarm/miniconda3/envs/lerobot/bin/python
+Environment=RGBD_RECORD_CPUSET=3-7
+ExecStart=/home/openarm/miniconda3/envs/lerobot/bin/python /home/openarm/dev/openarm-rgbd-preview/scripts/jetson_record_manager.py --root /home/openarm/dev/openarm-rgbd-preview
+StandardOutput=append:/home/openarm/.local/state/openarm-rgbd-host/record-manager.log
+StandardError=append:/home/openarm/.local/state/openarm-rgbd-host/record-manager.log
+
+[Install]
+WantedBy=default.target

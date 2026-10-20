@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenArm temporary laptop-leader desktop-follower teleoperation
+After=network-online.target
+
+[Service]
+Type=exec
+Environment=JETSON_HOST=openarm-follower-test
+Environment=JETSON_ROOT=/home/openarm/dev/openarm-remote-harvest
+Environment=PEER_IP=192.168.50.3
+Environment=FOLLOWER_RIGHT_CAN=can0
+Environment=FOLLOWER_LEFT_CAN=can1
+Environment=JETSON_CONTROL_CPUSET=0-2
+ExecStart=/usr/bin/bash /home/openarm/dev/openarm-remote-harvest/scripts/run_bimanual_remote_feedback.sh
+KillMode=control-group
+TimeoutStopSec=15
+StandardOutput=append:/tmp/openarm-daily-start/teleop.log
+StandardError=append:/tmp/openarm-daily-start/teleop.log
+
+[Install]
+WantedBy=default.target

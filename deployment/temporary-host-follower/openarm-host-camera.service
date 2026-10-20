@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenArm temporary host three-camera RGB-D service
+
+[Service]
+Type=exec
+CPUAffinity=3 4 5 6 7
+Environment=LD_LIBRARY_PATH=/home/openarm/miniconda3/envs/lerobot/lib/python3.12/site-packages/pyorbbecsdk
+ExecStart=/home/openarm/miniconda3/envs/lerobot/bin/python /home/openarm/dev/openarm-rgbd-preview/scripts/jetson_orbbec_rgbd_service.py --config /home/openarm/dev/openarm-rgbd-preview/config/orbbec_rgbd_jetson.yaml
+WorkingDirectory=/home/openarm/openarm_robot
+StandardOutput=append:/home/openarm/.local/state/openarm-rgbd-host/camera.log
+StandardError=append:/home/openarm/.local/state/openarm-rgbd-host/camera.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=启动临时主从采集测试（笔记本主臂＋旧主机从臂）
+Comment=今天的临时双机采集测试；启动前须确认四臂归位路径安全
+Exec=/home/openarm/openarm-transfer/run-laptop-with-host-follower-terminal.sh
+Terminal=false
+Categories=Utility;

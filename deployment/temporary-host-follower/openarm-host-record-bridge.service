@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenArm temporary host read-only follower recording bridge
+
+[Service]
+Type=exec
+Environment=OPENARM_RGBD_ROOT=/home/openarm/dev/openarm-rgbd-preview
+Environment=RGBD_CPUSET=3-7
+ExecStart=/bin/bash /home/openarm/openarm_robot/start-host-record-bridge.sh
+StandardOutput=append:/home/openarm/.local/state/openarm-rgbd-host/record-bridge.log
+StandardError=append:/home/openarm/.local/state/openarm-rgbd-host/record-bridge.log
+
+[Install]
+WantedBy=default.target

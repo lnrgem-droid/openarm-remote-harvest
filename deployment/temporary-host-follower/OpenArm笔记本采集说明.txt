@@ -1,0 +1,28 @@
+OpenArm 笔记本采集说明（2026-10-20）
+
+主臂接本笔记本：右主臂 can0，左主臂 can1。
+从臂与三路 RGB-D 相机接 Jetson；Jetson 从臂为右 can1、左 can2。
+笔记本有线 IP：192.168.50.1/24；Jetson 预期 IP：192.168.50.2/24。
+
+现场接线后，先在笔记本终端做只读检查：
+  ip -brief address show enp59s0
+  ip -brief link show can0
+  ip -brief link show can1
+  ssh openarm-jetson hostname
+
+确认两端机械臂运动范围无障碍、人员在场并可操作急停后，双击桌面
+“启动蘑菇采集控制台”。这个入口会配置 CAN、连接 Jetson、使能四臂并自动归位；
+因此不能把它当作只打开相机的按钮。采集界面出现后再手动选择批次和录制。
+
+源码：
+  /home/openarm/dev/openarm-remote-harvest
+  /home/openarm/dev/openarm-rgbd-preview
+安装及编译日志：
+  /home/openarm/openarm-transfer/install-system-deps.log
+  /home/openarm/openarm-transfer/build-ros.log
+
+Jetson 本次处于关机状态；其现有 ROS overlay、三路相机和录制服务要在现场开机后
+检查。若只读 SSH 检查失败，不要点击采集入口。
+
+旧主机非历史资料备份：/home/openarm/openarm-host-backup-20261020/
+历史录制数据按要求未保留在本笔记本，旧主机副本仍在。
