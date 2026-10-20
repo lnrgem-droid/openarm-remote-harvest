@@ -56,6 +56,16 @@ LANCZOS = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
 MASTER_ALIGN_PHASES = {"resetting", "preparing", "moving", "settling", "stopping", "releasing"}
 
+def left_static_hold_confirmed(status):
+    collection = status.get('collection') or {}
+    detail = collection.get('left_master_align_detail') or {}
+    return (collection.get('left_static_hold_confirmed') is True
+            and collection.get('left_static_hold_phase') == 'held'
+            and detail.get('leader_left_mode') == 1 and status.get('connected') is True
+            and status.get('teleop_ready') is True
+            and all(type(status.get(key)) in (int, float) and math.isfinite(status[key])
+                    and 0 <= status[key] < 100 for key in ('action_age_ms', 'feedback_age_ms')))
+
 
 def left_master_servo_free(status):
     """Only a fresh, side-specific physical ACK can prove servo release."""
@@ -76,7 +86,8 @@ def left_master_busy(status):
     detail = collection.get('left_master_align_detail') or {}
     return bool(status.get('left_master_align_may_be_active') or status.get('left_master_align_stop_requested')
                 or collection.get('left_master_align_active') is True or phase in MASTER_ALIGN_PHASES
-                or (isinstance(detail, dict) and detail.get('leader_left_mode') in (1, 2))
+                or (isinstance(detail, dict) and detail.get('leader_left_mode') in (1, 2)
+                    and collection.get('left_static_hold_phase', 'idle') == 'idle')
                 or (phase in {'paused', 'failed', 'completed'}
                     and (not isinstance(detail, dict) or detail.get('servo_released') is not True
                          or type(detail.get('leader_left_mode')) is not int or detail['leader_left_mode'] != 0)))
@@ -138,7 +149,11 @@ def right_servo_release_reason(status):
     detail = collection.get('left_master_align_detail') or {}
     if (not isinstance(detail, dict) or type(detail.get('leader_right_mode')) is not int
             or detail['leader_right_mode'] not in (0, 1, 2)
-            or type(detail.get('leader_left_mode')) is not int or detail['leader_left_mode'] != 0):
+            or type(detail.get('leader_left_mode')) is not int
+            or (detail['leader_left_mode'] != 0 and not left_static_hold_confirmed(status)
+                and not (collection.get('left_static_hold_phase') == 'failed'
+                         and collection.get('left_static_hold_requested') is True
+                         and detail['leader_left_mode'] in (1, 2)))):
         return '左右主臂伺服状态不完整或左主臂仍在伺服，暂不能解除右主臂伺服。'
     if (left_master_busy(status) or collection.get('left_align_active') is not False
             or status.get('left_align_may_be_active') or status.get('left_align_stop_requested')):
@@ -178,7 +193,7 @@ def right_master_start_reason(status):
         return '右主臂回位伺服尚未解除，请先点击“解除右主臂回位伺服”并确认。'
     detail = collection.get('right_master_align_detail') or {}
     if (not right_master_servo_free(status) or type(detail.get('leader_left_mode')) is not int
-            or detail['leader_left_mode'] != 0):
+            or (detail['leader_left_mode'] != 0 and not left_static_hold_confirmed(status))):
         return '左右主臂伺服尚未确认释放，暂不能开始右主臂对齐。'
     for key in ('leader_axes', 'applied_axes'):
         axes = status.get(key)
@@ -210,6 +225,8 @@ def right_recording_posture_reason(status):
 def left_master_start_reason(status):
     """Shared button and transport gate; the runtime rechecks before motion."""
     collection = status.get('collection') or {}
+    if collection.get('left_static_hold_phase', 'idle') != 'idle':
+        return '请先点击“解除左主臂保持”，确认解除后再对齐并恢复跟随。'
     if collection.get('left_master_align_supported') is not True:
         return '运行中的控制器尚未加载左主臂自动对齐功能；需确认现场可四臂归位后重启加载。'
     if right_master_busy(status):
@@ -580,12 +597,6 @@ with tempfile.TemporaryDirectory(prefix="oa_ui_status_") as temporary:
   reply=client.recv(65536).decode();print(reply)
   if "error" in json.loads(reply):raise SystemExit(2)
 '''
-        remote = (
-            "source /opt/ros/humble/setup.bash && "
-            "source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install/setup.bash && "
-            "source /home/nvidia/dev/openarm-remote-harvest/ros2_robot/install_bimanual/setup.bash && "
-            "ros2 run remote_teleop_runtime remote-teleop-control "
-        )
         while not self.stop.is_set():
             try:
                 command = self.requests.get_nowait()
@@ -610,18 +621,18 @@ with tempfile.TemporaryDirectory(prefix="oa_ui_status_") as temporary:
                         self.results.put((command, {'error': reason}))
                         self.pending = not self.requests.empty()
                         continue
-                # New alignment commands use the same runtime socket without
-                # ROS startup latency; the runtime retains all motion gates.
-                fast_socket = command in {"status", "left_follow", "left_align_pause", "left_master_align", "left_master_pause", "right_master_align", "right_master_pause", "right_pause", "right_servo_release"}
-                remote_command = "/usr/bin/python3 -" if fast_socket else remote + command
+                # The CLI sends the same payload to this runtime socket.
+                # Use it for every command so a follower PC does not depend
+                # on a Jetson-specific home directory or ROS environment.
+                # The runtime retains all motion gates.
                 payload = ({'command': 'right_pause', 'release_servo': True}
                            if command == 'right_servo_release' else {'command': command})
                 probe = status_probe.replace('{"command":"status"}', json.dumps(payload, separators=(',', ':')))
                 result = subprocess.run(
-                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", self.ssh_host, remote_command],
-                    input=probe if fast_socket else None,
+                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", self.ssh_host, "/usr/bin/python3 -"],
+                    input=probe,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    timeout=3 if fast_socket else 4, check=True,
+                    timeout=3, check=True,
                 )
                 value = parse_json_output(result.stdout)
                 if "error" in value:
@@ -729,13 +740,18 @@ with tempfile.TemporaryDirectory(prefix="oa_ui_status_") as temporary:
         if command == 'left_align_follow':
             self.request_error = "从臂自动对齐入口已关闭，请使用“主臂自动对齐并恢复左臂跟随”。"
             return False
-        if command not in {"left_lock", "left_follow", "left_align_follow", "left_align_pause",
+        if command not in {"left_lock", "left_lock_both", "left_hold_release", "left_follow", "left_align_follow", "left_align_pause",
                            "left_master_align", "left_master_pause", "right_master_align", "right_master_pause",
                            "right_save", "right_return", "right_pause", "right_servo_release", "right_follow"}:
             self.request_error = "不支持的姿态操作。"
             return False
         snapshot = self.snapshot()
         collection = snapshot.get('collection') or {}
+        if collection.get('left_static_hold_phase', 'idle') != 'idle':
+            if command not in {'left_hold_release', 'left_lock_both', 'right_pause', 'right_master_pause', 'right_servo_release'} and (
+                    command.startswith('left_') or not left_static_hold_confirmed(snapshot)):
+                self.request_error = '左主臂保持尚未解除或未确认，请先处理保持状态。'
+                return False
         if command == 'left_lock' and left_master_busy(snapshot):
             command = 'left_master_pause'
         if command == 'right_master_align':
@@ -1137,6 +1153,14 @@ class MushroomCollectionApp:
             self.set_notice("下电流程已锁定姿态操作，不会自动恢复运动。")
             return
         teleop = self.teleop.snapshot()
+        collection = teleop.get('collection') or {}
+        if command == 'left_master_pause' and collection.get('left_static_hold_phase', 'idle') != 'idle':
+            if not messagebox.askyesno("解除左主臂保持",
+                    "请扶稳左主臂及夹爪，解除后可手动移动。\n左从臂及夹爪继续保持，不会自动恢复跟随。"):
+                return
+            command = 'left_hold_release'
+        if command == 'left_lock' and collection.get('left_static_hold_supported') is True:
+            command = 'left_lock_both'
         if command == 'left_lock' and self.master_alignment_busy(teleop):
             command = 'left_master_pause'
         state, _, pending = self.control.snapshot()
@@ -1240,7 +1264,7 @@ class MushroomCollectionApp:
             self.set_notice("操作已发送，正在等待控制器确认…")
             if release_right_servo:
                 self.set_notice('已请求解除右主臂回位伺服，等待实时确认；右从臂保持，不会自动跟随。')
-            if command == "left_lock":
+            if command in {"left_lock", "left_lock_both"}:
                 self.manual_left_follow_attempted = self.manual_left_completed = False
                 self.manual_left_result = ""
             if command in {"left_align_follow", "left_align_pause"}:
@@ -1811,6 +1835,16 @@ class MushroomCollectionApp:
                         motion_text += '；' + blocked
                 if self.left_master_align_notice:
                     motion_text += '；' + self.left_master_align_notice
+                static_phase = collection.get('left_static_hold_phase', 'idle')
+                if static_phase != 'idle':
+                    if left_static_hold_confirmed(teleop):
+                        motion_text = '左主臂、左从臂及夹爪均已保持（电机保持）'
+                    elif static_phase == 'releasing':
+                        motion_text = '等待左主臂解除保持确认；左从臂和夹爪继续保持'
+                    elif static_phase == 'failed':
+                        motion_text = '左主臂保持异常或不可确认；请检查并显式解除保持'
+                    else:
+                        motion_text = '左从臂保持；等待左主臂保持确认，请勿松手'
             if side == 'right' and (self.right_master_alignment_busy(teleop)
                     or collection.get('right_master_align_phase') in {'paused', 'failed', 'completed'}):
                 detail = collection.get('right_master_align_detail') or {}
@@ -1859,7 +1893,9 @@ class MushroomCollectionApp:
                 else:
                     button.grid_remove()
             elif command == 'left_master_pause':
-                available = self.master_alignment_busy(teleop)
+                static_active = collection.get('left_static_hold_phase', 'idle') != 'idle'
+                button.configure(text='解除左主臂保持' if static_active else '停止主臂对齐')
+                available = (available if static_active else self.master_alignment_busy(teleop))
             elif command == 'left_master_align':
                 available = available and not state.get('active_episode') and not left_master_start_reason(self.master_alignment_snapshot(teleop))
             elif command == 'left_lock' and self.master_alignment_busy(teleop):
@@ -1871,6 +1907,11 @@ class MushroomCollectionApp:
             if command == 'right_pause' and self.right_master_alignment_busy(teleop):
                 button.configure(text='停止右主臂对齐')
                 available = True
+            if command == 'left_lock':
+                button.configure(text=('保持左主从臂及夹爪'
+                    if collection.get('left_static_hold_supported') is True else '保持左从臂及夹爪'))
+                if collection.get('left_static_hold_phase', 'idle') != 'idle':
+                    available = False
             button.configure(state="normal" if available else "disabled")
         self.teleop_status_label.configure(fg="#79d65a" if teleop_running else "#ff5656")
         recording_label = {

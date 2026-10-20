@@ -153,6 +153,30 @@ def right_master_ready_status():
 
 
 class ConsoleSimulationTest(unittest.TestCase):
+    def test_dual_hold_button_routes_only_when_capability_is_present(self):
+        self.app.teleop.value = master_ready_status()
+        self.app.teleop.value['collection']['left_static_hold_supported'] = True
+        self.app._tick_once()
+        self.assertEqual(self.app.motion_buttons['left_lock'].cget('text'), '保持左主从臂及夹爪')
+        self.app.on_motion('left_lock')
+        self.assertEqual(self.app.teleop.calls, ['left_lock_both'])
+
+    def test_static_hold_release_is_explicit_and_does_not_resume_follow(self):
+        self.app.teleop.value = master_ready_status()
+        c = self.app.teleop.value['collection']
+        c.update(left_static_hold_supported=True, left_static_hold_phase='held',
+                 left_static_hold_confirmed=True)
+        c['left_master_align_detail'].update(leader_left_mode=1, servo_released=False)
+        self.app._tick_once()
+        self.assertFalse(self.app.master_alignment_busy())
+        self.assertEqual(self.app.motion_buttons['left_master_pause'].cget('text'), '解除左主臂保持')
+        with patch.object(ui.messagebox, 'askyesno', return_value=False):
+            self.app.on_motion('left_master_pause')
+        self.assertFalse(self.app.teleop.calls)
+        with patch.object(ui.messagebox, 'askyesno', return_value=True):
+            self.app.on_motion('left_master_pause')
+        self.assertEqual(self.app.teleop.calls, ['left_hold_release'])
+
     def right_auto_ready(self):
         self.app.teleop.value = right_master_ready_status()
         self.app._tick_once()
@@ -1099,6 +1123,28 @@ class ConsoleSimulationTest(unittest.TestCase):
 
 
 class StatusPollingTest(unittest.TestCase):
+    def test_static_hold_allows_right_alignment_but_requires_release_before_left_alignment(self):
+        status = right_master_ready_status()
+        status['collection'].update(left_static_hold_phase='held', left_static_hold_confirmed=True)
+        for name in ('left_master_align_detail', 'right_master_align_detail'):
+            status['collection'][name]['leader_left_mode'] = 1
+        status['collection']['left_master_align_detail']['servo_released'] = False
+        self.assertEqual(ui.right_master_start_reason(status), '')
+        self.assertIn('解除左主臂保持', ui.left_master_start_reason(status))
+        status['action_age_ms'] = 200
+        self.assertFalse(ui.left_static_hold_confirmed(status))
+        self.assertNotEqual(ui.right_master_start_reason(status), '')
+
+    def test_unconfirmed_static_hold_blocks_right_requests_but_allows_release(self):
+        monitor = REAL_TELEOP_MONITOR('offline-peer')
+        monitor._value = master_ready_status()
+        monitor._value['collection'].update(left_static_hold_phase='failed', left_static_hold_confirmed=False)
+        with patch.object(ui, 'apply_current_report', lambda value: dict(value)):
+            self.assertFalse(monitor.request('right_save'))
+            self.assertFalse(monitor.request('left_follow'))
+            self.assertTrue(monitor.request('left_hold_release'))
+        self.assertEqual(monitor.requests.get_nowait(), 'left_hold_release')
+
     def right_master_monitor(self):
         monitor = self.master_monitor()
         monitor._value = right_master_ready_status()
@@ -1416,9 +1462,11 @@ class StatusPollingTest(unittest.TestCase):
         self.assertTrue(monitor.requests.empty())
         self.assertIn("入口已关闭", monitor.request_error)
 
-    def test_manual_follow_uses_fast_socket_and_timeout_never_retries(self):
-        for timeout in (False, True):
-            with self.subTest(timeout=timeout):
+    def test_collection_commands_use_socket_and_timeout_never_retries(self):
+        for command, timeout in ((command, timeout)
+                                 for command in ("left_lock", "left_lock_both", "left_hold_release", "left_follow", "right_save", "right_return", "right_follow")
+                                 for timeout in (False, True)):
+            with self.subTest(command=command, timeout=timeout):
                 monitor = self.alignment_monitor()
                 calls = []
                 def run(argv, **kwargs):
@@ -1427,11 +1475,11 @@ class StatusPollingTest(unittest.TestCase):
                     if timeout: raise ui.subprocess.TimeoutExpired(argv, kwargs["timeout"])
                     return ui.subprocess.CompletedProcess(argv, 0, stdout=json.dumps(monitor._value), stderr="")
                 with patch.object(ui, "apply_current_report", lambda value: dict(value)), patch.object(ui.subprocess, "run", run):
-                    self.assertTrue(monitor.request("left_follow"))
+                    self.assertTrue(monitor.request(command))
                     monitor._run()
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0][0][-1], "/usr/bin/python3 -")
-                self.assertIn('"command":"left_follow"', calls[0][1]["input"])
+                self.assertIn(f'"command":"{command}"', calls[0][1]["input"])
                 self.assertEqual(calls[0][1]["timeout"], 3)
                 self.assertTrue(monitor.requests.empty())
 
