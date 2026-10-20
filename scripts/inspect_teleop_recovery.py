@@ -7,6 +7,7 @@ can be reinitialized ONLY after operator confirmation and a second observation.
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -17,6 +18,27 @@ import sys
 
 
 POWER_DOWN_RECEIPT = Path.home() / '.local/state/openarm/last-power-down.json'
+
+
+def connection_config():
+    """One explicit wiring profile shared by start, stop and their evidence."""
+    name = os.environ.get('OPENARM_TELEOP_PROFILE', 'jetson')
+    if name not in ('jetson', 'host-test'):
+        raise ValueError('unknown teleoperation profile')
+    test = name == 'host-test'
+    return {'profile': name,
+            'service': 'openarm-host-test-teleop.service' if test else 'openarm-remote-teleop.service',
+            'peer': 'openarm-follower-test' if test else 'openarm-jetson',
+            'peer_ip': '192.168.50.3' if test else '192.168.50.2',
+            'host_interfaces': ['can0', 'can1'],
+            'follower_interfaces': ['can0', 'can1'] if test else ['can1', 'can2'],
+            'recorder_python': ('/home/openarm' if test else '/home/nvidia') +
+                               '/miniconda3/envs/lerobot/bin/python'}
+
+
+def buses_by_side():
+    config = connection_config()
+    return (('host', config['host_interfaces']), ('follower', config['follower_interfaces']))
 
 
 def read_power_down_receipt():
@@ -49,7 +71,7 @@ def atomic_receipt(receipt):
 def verified_disable_reports(devices):
     if not isinstance(devices, dict) or set(devices) != {'host', 'follower'}:
         return False
-    for side, buses in (('host', ('can0', 'can1')), ('follower', ('can1', 'can2'))):
+    for side, buses in buses_by_side():
         report = devices.get(side) or {}
         if not isinstance(report, dict): return False
         if any(report.get(key) is not True for key in ('ok', 'verified', 'acknowledged')):
@@ -76,6 +98,10 @@ def known_power_down_eligible(e):
         receipt = e.get('power_down_receipt') or {}
         remote = e['remote']; status = remote['status']; collection = status['collection']
         unit = e['host_unit']
+        if (receipt.get('profile', 'jetson') != connection_config()['profile']
+                or e.get('profile', 'jetson') != connection_config()['profile']
+                or receipt.get('peer', e.get('peer')) != e.get('peer')):
+            return False
         if (receipt.get('schema_version') != 1 or receipt.get('consumed') is not False
                 or not receipt.get('shutdown_id') or not verified_disable_reports(receipt.get('devices'))):
             return False
@@ -111,7 +137,7 @@ def known_power_down_eligible(e):
         motors = e.get('motor_report') or {}
         if motors.get('result') not in ('UNKNOWN', 'DISABLED'):
             return False
-        for side, buses in (('host', ('can0', 'can1')), ('follower', ('can1', 'can2'))):
+        for side, buses in buses_by_side():
             part = motors.get(side) or {}; values = part.get('motors') or {}
             if part.get('result') not in ('UNKNOWN', 'DISABLED'):
                 return False
@@ -140,6 +166,7 @@ def save_power_down_receipt(before, after, devices):
     if not session or session != after['remote']['status'].get('leader_session_id'):
         raise RuntimeError('下电期间控制会话改变')
     receipt = {'schema_version': 1, 'shutdown_id': uuid.uuid4().hex, 'consumed': False,
+               'profile': connection_config()['profile'], 'peer': before.get('peer'),
                'completed_unix_s': time.time(), 'host_boot_id': before['host_boot_id'],
                'remote_boot_id': before['remote']['boot_id'], 'service_invocation_id': invocation,
                'leader_session_id': session,
@@ -203,7 +230,7 @@ def remote_probe():
     except (OSError, ValueError):
         pass
     try:
-        links, result['can_ok']=can_links(('can1','can2'))
+        links, result['can_ok']=can_links(connection_config()['follower_interfaces'])
         result['can']=links
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
         pass
@@ -214,7 +241,7 @@ s.setsockopt(zmq.RCVTIMEO,2000);s.setsockopt(zmq.SNDTIMEO,2000)
 s.connect("tcp://127.0.0.1:5557");s.send_json({"command":"status"})
 print(json.dumps(s.recv_json()));s.close();c.term()
 '''
-        r=json.loads(command(['/home/nvidia/miniconda3/envs/lerobot/bin/python','-c',code]))
+        r=json.loads(command([connection_config()['recorder_python'],'-c',code]))
         result['recorder_idle'] = recorder_is_idle(r)
         result['recorder_status'] = {key: r.get(key) for key in
                                      ('ok', 'running', 'phase', 'active_episode', 'stop_reason')}
@@ -227,7 +254,7 @@ def all_disabled(report):
     """Check every physical motor, not just a summary string or ROS state."""
     if not isinstance(report, dict) or report.get('result') != 'DISABLED':
         return False
-    for role,buses in (('host',('can0','can1')),('follower',('can1','can2'))):
+    for role,buses in buses_by_side():
         part=report.get(role) or {}
         if not isinstance(part,dict): return False
         motors=part.get('motors') or {}
@@ -351,18 +378,30 @@ def classify(e):
 
 
 def inspect(jetson):
-    e={'ssh_ok':False}
+    config = connection_config()
+    e={'ssh_ok':False, 'profile':config['profile'], 'peer':jetson}
     e['power_down_receipt'] = read_power_down_receipt()
     try:
         e['host_boot_id'] = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        output = command(['systemctl', '--user', 'show', 'openarm-remote-teleop.service',
-                          '-p', 'MainPID', '-p', 'InvocationID', '-p', 'ActiveState', '-p', 'ControlGroup'])
+        output = command(['systemctl', '--user', 'show', config['service'],
+                          '-p', 'MainPID', '-p', 'InvocationID', '-p', 'ActiveState', '-p', 'ControlGroup', '-p', 'LoadState'])
         e['host_unit'] = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
+    e['local_control_processes'] = []
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            names = {Path(a).name for a in proc.joinpath('cmdline').read_text().split('\0') if a}
+            if names & {'openarm_gravity_pd_node', 'remote-teleop-leader'}:
+                e['local_control_processes'].append(int(proc.name))
+        except (OSError, UnicodeError):
+            continue
     try:
         probe_result=subprocess.run([sys.executable,str(Path(__file__).with_name('check_motor_enable.py')),
-            '--jetson',jetson],text=True,capture_output=True,timeout=12,check=False)
+            '--jetson',jetson, '--follower-interfaces', *config['follower_interfaces']],
+            text=True,capture_output=True,timeout=12,check=False)
         if probe_result.returncode in (0,10,11,12):
             e['motor_report']=json.loads(probe_result.stdout)
             e['host_motors']=e['motor_report']['host']['result']
@@ -372,14 +411,15 @@ def inspect(jetson):
     try:
         if jetson.startswith('-'): raise ValueError('invalid SSH target')
         e['remote']=json.loads(command(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=3',
-            jetson,'/usr/bin/python3 - --remote'], input=Path(__file__).read_text()))
+            jetson,'OPENARM_TELEOP_PROFILE=' + config['profile'] + ' /usr/bin/python3 - --remote'],
+            input=Path(__file__).read_text()))
         e['ssh_ok']=True
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         e['error']=str(exc)
     try:
         f=Path('/tmp/openarm-remote-teleop/peer-boot-id')
         e['previous_boot_id']=f.read_text().strip() if f.exists() else None
-        pid=int(command(['systemctl','--user','show','openarm-remote-teleop.service','-p','MainPID','--value']))
+        pid=int(command(['systemctl','--user','show',config['service'],'-p','MainPID','--value']))
         e['host_service_pid']=pid
         import os
         stat=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()

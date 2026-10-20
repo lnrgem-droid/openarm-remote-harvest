@@ -185,11 +185,11 @@ class PassiveListener:
             sock.close()
 
 
-def disable_worker(side):
+def disable_worker(side, interfaces=None):
     """Runs with ROS environment on the machine owning these CAN interfaces."""
     import rclpy
     from std_srvs.srv import Trigger
-    interfaces = ["can0", "can1"] if side == "host" else ["can1", "can2"]
+    interfaces = interfaces or (["can0", "can1"] if side == "host" else ["can1", "can2"])
     service = f"/{'leader' if side == 'host' else 'follower'}/openarm_gravity_pd/disable"
     listener = None
     node = None
@@ -228,7 +228,7 @@ def disable_worker(side):
 
 
 class DeviceProcess:
-    def __init__(self, side, peer):
+    def __init__(self, side, peer, interfaces=None):
         self.side = side
         self.buffer = b""
         # Stream the exact local implementation, avoiding stale remote files.
@@ -236,7 +236,7 @@ class DeviceProcess:
         payload = ("import types,sys\nm=types.ModuleType('check_motor_enable')\n"
                    + "exec(" + repr(checker) + ",m.__dict__)\nsys.modules[m.__name__]=m\n"
                    + "ns={'__name__':'power_down_worker'}\nexec(" + repr(Path(__file__).read_text())
-                   + ",ns)\nns['disable_worker'](" + repr(side) + ")\n")
+                   + ",ns)\nns['disable_worker'](" + repr(side) + ", " + repr(interfaces) + ")\n")
         # A single JSON line carries code; unbuffered os.read leaves subsequent
         # authorization bytes available to select()/readline() in the worker.
         bootstrap = "import os,json\nb=b''\nwhile not b.endswith(b'\\n'): b+=os.read(0,1)\nexec(json.loads(b))"
@@ -365,8 +365,7 @@ with tempfile.TemporaryDirectory(prefix="power_down_hold_") as directory:
     return json.loads(result.stdout)
 
 
-def stop_service():
-    service = "openarm-remote-teleop.service"
+def stop_service(service="openarm-remote-teleop.service"):
     subprocess.run(["systemctl", "--user", "stop", service], check=True,
                    capture_output=True, text=True, timeout=22)
     result = subprocess.run(["systemctl", "--user", "show", service,
@@ -435,7 +434,7 @@ def coordinate(request, hold, make_device, stop, progress=emit, *, capture=None,
         if finish:
             finish(identity, reports)
         result = {"event": "complete", "ok": True, "stage": "complete", "devices": reports,
-                  "message": "主从电机已确认失能，可手动关闭机械臂电源。Jetson 保持开机。"}
+                  "message": "主从遥操已停止，32个电机已确认失能。可手动关闭机械臂电源；电脑仍保持开机。"}
     except Exception as exc:
         result = {"event": "complete", "ok": False, "stage": stage, "devices": reports,
                   "message": "下电未完成：" + str(exc)}
@@ -454,18 +453,27 @@ def main():
     parser.add_argument("--confirm", action="store_true", help="operator has placed and supported all four arms")
     parser.add_argument("--jetson", default="openarm-jetson")
     parser.add_argument("--recorder", default="tcp://192.168.50.2:5557")
+    parser.add_argument("--profile", choices=("jetson", "host-test"),
+                        default=os.environ.get("OPENARM_TELEOP_PROFILE", "jetson"))
     args = parser.parse_args()
     if not args.confirm:
         parser.error("必须先确认四臂已支撑、夹爪无物，再使用 --confirm")
     if args.jetson.startswith("-"):
         parser.error("invalid SSH destination")
+    os.environ["OPENARM_TELEOP_PROFILE"] = args.profile
+    from inspect_teleop_recovery import connection_config
+    config = connection_config()
+    if args.jetson != config["peer"] or args.recorder != f"tcp://{config['peer_ip']}:5557":
+        parser.error("连接目标与所选遥操配置不一致")
     def interrupted(_signum, _frame):
         raise ShutdownError("下电协调程序被中断；结果未确认，不会自动恢复运动")
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
-    with open("/tmp/openarm-power-down.lock", "a") as lock:
+    with open("/tmp/openarm-teleop-lifecycle.lock", "a") as lock, \
+            open("/tmp/openarm-daily-teleop.lock", "a") as daily_lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(daily_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             emit({"event": "complete", "ok": False, "message": "已有下电操作正在执行"})
             return 1
@@ -478,7 +486,8 @@ def main():
         def finish(before, reports):
             save_power_down_receipt(before, capture(), reports)
         result = coordinate(RecorderClient(args.recorder), lambda: hold_following(args.jetson),
-                            lambda side: DeviceProcess(side, args.jetson), stop_service,
+                            lambda side: DeviceProcess(side, args.jetson, config[side + "_interfaces"]),
+                            lambda: stop_service(config["service"]),
                             capture=capture, finish=finish)
         return 0 if result["ok"] else 1
 

@@ -301,6 +301,24 @@ echo "使用与“启动主从遥操”完全相同的遥操核心：$TELEOP_COR
 # same name used to fail after a second desktop click, leaving the follower in
 # FAULT.  A regular unit has atomic, repeatable restart semantics.
 ensure_teleop_service
+if [[ "$(basename "$COLLECTION_CONSOLE")" == mushroom_collection_console.py ]]; then
+  # Opening the operator console must never imply permission to enable/home.
+  # Keep recorder/session state intact; the console owns explicit save/stop.
+  profile=jetson
+  [[ "$TEST_HOST_MODE" != true ]] || profile=host-test
+  export OPENARM_TELEOP_PROFILE="$profile"
+  echo '采集界面即将打开；不会启动或重启遥操。请在界面点击“开始主从遥操…”。'
+  extra_args=()
+  if [[ -n "${COLLECTION_CONSOLE_EXTRA_ARGS//[[:space:]]/}" ]]; then
+    read -r -a extra_args <<<"$COLLECTION_CONSOLE_EXTRA_ARGS"
+  fi
+  # The initializer no longer owns the lifecycle while the window is open.
+  flock -u 9
+  exec 9>&-
+  exec "$COLLECTION_PYTHON" "$COLLECTION_CONSOLE" --jetson "$PEER_IP" \
+    --jetson-ssh "$JETSON_HOST" --teleop-profile "$profile" \
+    --preview-port 5556 --record-port 5557 "${extra_args[@]}"
+fi
 status="$(teleop_status)"
 motor_report="$(/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST" --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN")" || true
 motors_enabled=false

@@ -127,7 +127,7 @@ class MotorEnableTest(unittest.TestCase):
         # Exercise the actual launcher branch, replacing hardware/SSH/systemd
         # boundaries only. No shell in this test can touch real robot services.
         source = (ROOT / 'scripts/daily_start_teleop_rgbd.sh').read_text()
-        branch = source[source.index('\nensure_teleop_service\nstatus='):
+        branch = source[source.index('\nstatus="$(teleop_status)"', source.index('\nensure_teleop_service\n')):
                         source.index("\necho '  正在核实本会话两端")]
         # Feed simulated operator input, never access a real controlling TTY.
         branch = branch.replace('</dev/tty', '</dev/stdin')

@@ -152,7 +152,7 @@ def shell_fixture(tmp_path, before=None, after=None):
                   '\\\n    --jetson "$JETSON_HOST" --output "$report"')
     assert function.count(invocation) == 2
     function = function.replace(invocation, 'probe_fixture "$report"')
-    branch = source[source.index('\nensure_teleop_service\nstatus='):
+    branch = source[source.index('\nstatus="$(teleop_status)"', source.index('\nensure_teleop_service\n')):
                     source.index("\necho '  正在核实本会话两端")]
     invocation = '/usr/bin/python3 "$TELEOP_ROOT/scripts/check_motor_enable.py" --jetson "$JETSON_HOST"'
     assert branch.count(invocation) == 2
