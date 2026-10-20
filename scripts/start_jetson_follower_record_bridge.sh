@@ -12,7 +12,13 @@ if ss -ltn '( sport = :9000 )' | grep -q LISTEN; then
 fi
 
 source /opt/ros/humble/setup.bash
-source "$ROOT_DIR/ros2_robot/install/setup.bash"
+if [[ -f "$ROOT_DIR/ros2_robot/install/setup.bash" ]]; then
+  source "$ROOT_DIR/ros2_robot/install/setup.bash"
+else
+  # The temporary x86 follower host already has the identical bridge package
+  # in its teleoperation overlay; it does not need a second camera workspace.
+  source /home/openarm/dev/openarm-remote-harvest/ros2_robot/install/setup.bash
+fi
 set -u
 export ROS_LOCALHOST_ONLY=1
 exec taskset --cpu-list "$RGBD_CPUSET" nice -n 2 \

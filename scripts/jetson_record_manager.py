@@ -35,7 +35,7 @@ def synchronized(method):
 
 class Recorder:
     def __init__(self, root: Path, *, runtime_dir: Path | None = None, storage_root: Path | None = None) -> None:
-        runtime_dir = runtime_dir or Path("/home/nvidia/openarm-rgbd-runtime")
+        runtime_dir = runtime_dir or Path(os.environ.get("OPENARM_RGBD_RUNTIME", "/home/nvidia/openarm-rgbd-runtime"))
         self.root = root
         self.process: subprocess.Popen[bytes] | None = None
         self.pty_master: int | None = None
@@ -58,7 +58,7 @@ class Recorder:
         self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
         self.active_episode: dict | None = None
         self.last_episode: dict | None = None
-        self.allowed_storage_root = storage_root or Path("/home/nvidia/datasets")
+        self.allowed_storage_root = storage_root or Path(os.environ.get("OPENARM_DATASET_ROOT", "/home/nvidia/datasets"))
         self.session_base = self.allowed_storage_root / "openarm_harvest_sessions"
         self.camera_status_path = Path("/tmp/openarm-rgbd-camera-status.json")
         self.session_state_path = runtime_dir / "active-session.json"
@@ -666,7 +666,7 @@ class Recorder:
             return {"ok": False, "error": f"only {free_gb:.1f} GB free; 20 GB required", **self.status()}
         if dataset_root is None:
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            self.dataset_root = f"/home/nvidia/datasets/openarm_rgbd_{stamp}"
+            self.dataset_root = str(self.allowed_storage_root / f"openarm_rgbd_{stamp}")
         else:
             self.dataset_root = dataset_root
         self._generation += 1
