@@ -98,7 +98,10 @@ class UnitsAndOriginTest(unittest.TestCase):
             saved = pq.read_table(output / "episodes/0/obs/arms/left/state.parquet")
             self.assertEqual(saved["timestamp"].cast(pa.int64()).to_pylist(),
                              [origin, origin + 50_000_000])
-            self.assertEqual(saved["qpos"].to_pylist(), [list(range(8))] * 2)
+            for kind, offset in (("obs", 0), ("action", 16)):
+                for side, start in (("left", offset), ("right", offset + 8)):
+                    arm = pq.read_table(output / f"episodes/0/{kind}/arms/{side}/state.parquet")
+                    self.assertEqual(arm["qpos"].to_pylist(), [list(range(start, start + 8))] * 2)
             for role in converter.CAMERA_NAMES.values():
                 for ns, value in ((origin, 100), (origin + 50_000_000, 200)):
                     image = cv2.imread(str(output / f"episodes/0/cameras/{role}/{ns}.jpeg"))

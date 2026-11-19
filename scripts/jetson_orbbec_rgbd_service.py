@@ -7,7 +7,7 @@ only component allowed to open the physical Orbbec devices.
 """
 from __future__ import annotations
 
-import argparse, base64, fcntl, json, logging, os, queue, threading, time
+import argparse, base64, fcntl, json, logging, os, queue, sys, threading, time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +21,64 @@ ACTIVE_MARKER = Path("/tmp/openarm-rgbd-recording.active")
 ERROR_MARKER = Path("/tmp/openarm-rgbd-recording.error")
 SERVICE_LOCK = Path("/tmp/openarm-rgbd-camera-service.lock")
 STATUS_FILE = Path("/tmp/openarm-rgbd-camera-status.json")
+
+
+def frame_is_fresh(item, now_ns: int, max_age_ms: float = 200) -> bool:
+    if item is None:
+        return False
+    age_ms = (now_ns - item[0]["host_monotonic_ns"]) / 1e6
+    return 0 <= age_ms <= max_age_ms
+
+
+class RecoveryPolicy:
+    """Recover the SDK owner only after failed recording writers have drained."""
+    def __init__(self):
+        self.unhealthy_since = None
+        self.healthy_since = None
+
+    def due(self, now, healthy, recording, writers_open):
+        if healthy:
+            self.unhealthy_since = None
+            if self.healthy_since is None:
+                self.healthy_since = now
+            if now - self.healthy_since >= 30:
+                os.environ.pop("OPENARM_RGBD_RECOVERY_ATTEMPT", None)
+            return False
+        self.healthy_since = None
+        if self.unhealthy_since is None:
+            self.unhealthy_since = now
+        return now - self.unhealthy_since >= 8 and not recording and not writers_open
+
+
+def preview_message(cameras, quality, *, clock_ns=time.monotonic_ns):
+    # Always publish all role keys for existing clients, but never recycle a
+    # stale image as a live view. Missing cameras must not hide healthy ones.
+    message = {"schema_version": 1, "timestamps": {}, "frame_seq": {},
+               "images": {}, "camera_status": {}}
+    for camera in cameras:
+        role = camera.spec.role
+        item = camera.get()
+        # Capture can advance while earlier cameras are JPEG-encoded. Read
+        # the clock AFTER this camera's snapshot, not once before the loop:
+        # otherwise a newer frame has negative age and flashes a placeholder.
+        fresh = frame_is_fresh(item, clock_ns())
+        message["camera_status"][role] = {"healthy": fresh}
+        if fresh:
+            header, rgb, _ = item
+            image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            timestamp = header["host_realtime_ns"] / 1e9
+            sequence = header["frame_sequence"]
+        else:
+            image = np.zeros((480, 640, 3), np.uint8)
+            cv2.putText(image, role + ": NO LIVE FRAME", (25, 230),
+                        cv2.FONT_HERSHEY_SIMPLEX, .8, (100, 180, 255), 2)
+            timestamp, sequence = 0, -1
+        ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if ok:
+            message["images"][role] = base64.b64encode(buf).decode()
+            message["timestamps"][role] = timestamp
+            message["frame_seq"][role] = sequence
+    return message
 
 
 @dataclass(frozen=True)
@@ -126,6 +184,7 @@ class DepthSpooler:
     LeRobot depth-video representation without affecting teleoperation.
     """
     def __init__(self, roles: tuple[str, ...]):
+        self.available_roles = tuple(roles)
         self.roles = roles
         self.root: str | None = None
         self.data: dict[str, object] = {}
@@ -181,6 +240,7 @@ class DepthSpooler:
         temporary = receipt.with_suffix(".tmp")
         try:
             temporary.write_text(json.dumps({"dataset_root": self.root,
+                "camera_roles": list(self.roles),
                 "complete": self.error is None and not any(self.dropped.values()),
                 "written": self.written, "dropped": self.dropped, "error": self.error,
                 "closed_unix_s": time.time()}, ensure_ascii=False), encoding="utf-8")
@@ -225,6 +285,17 @@ class DepthSpooler:
             if self.root is not None:
                 if not self._close():
                     return
+            try:
+                config = Path(root) / "capture-config.json"
+                roles = json.loads(config.read_text(encoding="utf-8"))["camera_roles"] if config.exists() else list(self.available_roles)
+                if (not isinstance(roles, list) or not roles or any(not isinstance(r, str) for r in roles)
+                        or len(set(roles)) != len(roles) or not set(roles).issubset(self.available_roles)):
+                    raise ValueError("invalid selected camera roles")
+                self.roles = tuple(roles)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self.error = None
+                self._fail(f"RGB-D capture configuration invalid: {exc}")
+                return
             out = os.path.join(root, "depth_raw")
             os.makedirs(out, exist_ok=True)
             rgb_out = os.path.join(root, "rgb_raw")
@@ -242,6 +313,8 @@ class DepthSpooler:
             self.written = {role: 0 for role in self.roles}
             self.dropped = {role: 0 for role in self.roles}
         for role, (header, rgb, depth) in latest.items():
+            if role not in self.queues:
+                continue
             if header["frame_sequence"] == self.last_sequence[role]:
                 continue
             try:
@@ -286,6 +359,8 @@ def main() -> None:
     # teleoperation while leaving the 30 FPS RGB-D recording path priority.
     p.add_argument("--preview-fps", type=int, default=15); p.add_argument("--record-preview-fps", type=int, default=10)
     p.add_argument("--quality", type=int, default=75)
+    p.add_argument("--roles", nargs="+", choices=("left_wrist", "right_wrist", "chest"),
+                   default=["left_wrist", "right_wrist", "chest"])
     # Kept for command-line compatibility only.  Per-frame metadata belongs
     # beside the RGB-D payload inside each dataset and is written by
     # DepthSpooler.  Never append it globally while the camera service is idle.
@@ -298,22 +373,36 @@ def main() -> None:
         fcntl.flock(service_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise SystemExit("OpenArm RGB-D camera service is already running")
+    # exec below first releases all native SDK/USB handles, including stuck
+    # native capture threads. Waiting in the new process gives USB time to
+    # settle before any Pipeline is opened. The PID remains stable.
+    delay = min(60, max(0, float(os.environ.pop("OPENARM_RGBD_RECOVERY_DELAY", "0"))))
+    if delay:
+        LOG.warning("camera recovery: waiting %.0f seconds for USB release", delay)
+        time.sleep(delay)
     try: os.unlink(args.ipc.removeprefix("ipc://"))
     except FileNotFoundError: pass
-    cameras = [OrbbecCamera(s, 640, 480, args.fps) for s in load_specs(args.config)]
-    for camera in cameras: camera.start()
+    cameras = [OrbbecCamera(s, 640, 480, args.fps) for s in load_specs(args.config) if s.role in args.roles]
+    for camera in cameras:
+        try:
+            camera.start()
+        except Exception as exc:
+            camera.last_error = repr(exc)
+            LOG.exception("%s startup failed; will retry when idle", camera.spec.role)
     depth_spooler = DepthSpooler(tuple(camera.spec.role for camera in cameras))
     ctx = zmq.Context(); raw = ctx.socket(zmq.PUB); raw.setsockopt(zmq.SNDHWM, 12); raw.bind(args.ipc)
     preview = ctx.socket(zmq.PUB); preview.setsockopt(zmq.SNDHWM, 1); preview.setsockopt(zmq.LINGER, 0)
     preview.bind(f"tcp://*:{args.preview_port}")
     last_seq = {c.spec.role: -1 for c in cameras}; next_preview = 0.0; sent = 0; report = time.monotonic()
     report_counts = {c.spec.role: 0 for c in cameras}
+    recovery = RecoveryPolicy()
+    restart_requested = False
     try:
         while True:
             latest = {}
             for camera in cameras:
                 item = camera.get()
-                if not item: continue
+                if not frame_is_fresh(item, time.monotonic_ns()): continue
                 header, rgb, depth = item; latest[camera.spec.role] = item
                 if header["frame_sequence"] != last_seq[camera.spec.role]:
                     try:
@@ -329,15 +418,9 @@ def main() -> None:
             depth_spooler.update(latest)
             recording = ACTIVE_MARKER.exists()
             effective_preview_fps = args.record_preview_fps if recording else args.preview_fps
-            if now >= next_preview and len(latest) == 3:
-                message = {"schema_version": 1, "timestamps": {}, "frame_seq": {}, "images": {}}
-                for role, (header, rgb, _) in latest.items():
-                    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, args.quality])
-                    if ok:
-                        message["timestamps"][role] = header["host_realtime_ns"] / 1e9
-                        message["frame_seq"][role] = header["frame_sequence"]
-                        message["images"][role] = base64.b64encode(buf).decode()
-                if len(message["images"]) == 3:
+            if now >= next_preview:
+                message = preview_message(cameras, args.quality)
+                if len(message["images"]) == len(cameras):
                     try: preview.send_string(json.dumps(message), flags=zmq.NOBLOCK); sent += 1
                     except zmq.Again: pass
                 next_preview = now + 1.0 / effective_preview_fps
@@ -352,7 +435,7 @@ def main() -> None:
                         "rgbd_fps": round((camera.count - report_counts[camera.spec.role]) / elapsed, 1),
                         "age_ms": None if age_ms is None else round(age_ms, 1),
                         "pair_us": None if header is None else header["rgb_depth_pair_delta_us"],
-                        "drop": camera.dropped, "healthy": age_ms is not None and age_ms <= 200,
+                        "drop": camera.dropped, "healthy": frame_is_fresh(item, time.monotonic_ns()),
                         "error": camera.last_error,
                     }
                     report_counts[camera.spec.role] = camera.count
@@ -378,6 +461,11 @@ def main() -> None:
                     "spool_error": depth_spooler.error,
                 })
                 report, sent = now, 0
+                if recovery.due(now, not unhealthy, ACTIVE_MARKER.exists(),
+                                depth_spooler.root is not None):
+                    LOG.error("camera stream stalled: %s; restarting SDK owner after writer drain", unhealthy)
+                    restart_requested = True
+                    break
             time.sleep(0.001)
     except KeyboardInterrupt: pass
     finally:
@@ -385,5 +473,10 @@ def main() -> None:
         depth_spooler._close()
         STATUS_FILE.unlink(missing_ok=True)
         raw.close(0); preview.close(0); ctx.term()
+    if restart_requested:
+        attempt = min(4, int(os.environ.get("OPENARM_RGBD_RECOVERY_ATTEMPT", "0")) + 1)
+        os.environ["OPENARM_RGBD_RECOVERY_ATTEMPT"] = str(attempt)
+        os.environ["OPENARM_RGBD_RECOVERY_DELAY"] = str(min(60, 12 * 2 ** (attempt - 1)))
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 if __name__ == "__main__": main()

@@ -42,7 +42,7 @@ def recording_time_origin(source: Path, camera_times: dict[str, list[int]]) -> t
         if type(origin) is not int or origin <= 0:
             raise ValueError("meta/info.json started_unix_ns must be a positive integer")
         return origin, "meta/info.json:started_unix_ns"
-    if info.get("format") == "openarm_rgbd_staging_v1":
+    if info.get("format") in {"openarm_rgbd_staging_v1", "openarm_left_rgbd_staging_v1"}:
         raise ValueError("staging recording is missing meta/info.json started_unix_ns")
     # Older LeRobot recordings have no absolute robot clock anchor. Keep the
     # historical approximation explicit; never silently replace a broken anchor.
@@ -82,24 +82,40 @@ def read_rgb(source: Path, role: str, item: dict) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
 
 
-def metadata(task: str, camera_fps: float, success: bool) -> dict:
+def recording_camera_roles(source: Path, *, left_only: bool = False) -> tuple[str, ...]:
+    config = source / "capture-config.json"
+    if config.exists():
+        roles = json.loads(config.read_text(encoding="utf-8"))["camera_roles"]
+        if (not isinstance(roles, list) or not roles or any(not isinstance(r, str) for r in roles)
+                or len(set(roles)) != len(roles) or not set(roles).issubset(ROLES)):
+            raise ValueError("invalid recording camera_roles")
+        return tuple(roles)
+    # Legacy recordings retain their original required camera contract.
+    return ("left_wrist", "chest") if left_only else ROLES
+
+
+def metadata(task: str, camera_fps: float, success: bool, *, left_only: bool = False,
+             camera_roles: tuple[str, ...] | None = None) -> dict:
+    sides = ("left",) if left_only else ("right", "left")
+    roles = camera_roles if camera_roles is not None else (("left_wrist", "chest") if left_only else ROLES)
+    cameras = tuple(CAMERA_NAMES[role] for role in roles)
     return {
         "version": "0.4.0",
         "operator": "openarm remote teleoperation",
         "operation_type": "teleop",
         "location": "Jetson follower workstation",
-        "tasks": [{"prompt": task, "description": "Bimanual mushroom-harvesting teleoperation."}],
+        "tasks": [{"prompt": task, "description": "Single-left mushroom-log teleoperation." if left_only else "Bimanual mushroom-harvesting teleoperation."}],
         "episodes": [{"id": "0", "task_index": 0, "success": success}],
         "equipment": {
             "id": "OpenArmRemoteHarvest",
             "version": "1.0",
             "embodiments": {"arms": {"id": "OpenArm", "version": "2.0"}},
-            "perceptions": {"cameras": {name: {} for name in CAMERA_NAMES.values()}},
+            "perceptions": {"cameras": {name: {} for name in cameras}},
         },
         "frequencies": {
-            "obs": {"arms": {"right": 30.0, "left": 30.0}},
-            "action": {"arms": {"right": 30.0, "left": 30.0}},
-            "cameras": {name: camera_fps for name in CAMERA_NAMES.values()},
+            "obs": {"arms": {side: 30.0 for side in sides}},
+            "action": {"arms": {side: 30.0 for side in sides}},
+            "cameras": {name: camera_fps for name in cameras},
         },
     }
 
@@ -108,7 +124,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="one /home/nvidia/datasets/openarm_rgbd_* directory")
     parser.add_argument("output", type=Path, help="new empty OpenArmDataset v0.4 directory")
-    parser.add_argument("--task", default="bimanual mushroom harvesting teleoperation")
+    parser.add_argument("--task", default=None)
     parser.add_argument("--success", action="store_true", help="mark this episode successful (default: false)")
     parser.add_argument("--max-camera-skew-ms", type=float, default=100.0,
                         help="reject a robot/RGB nearest-frame match beyond this limit")
@@ -117,6 +133,15 @@ def main() -> None:
     args = parser.parse_args()
 
     source, output = args.source.resolve(), args.output.resolve()
+    info_path = source / "meta/info.json"
+    info = json.loads(info_path.read_text()) if info_path.exists() else {}
+    left_only = info.get("format") == "openarm_left_rgbd_staging_v1"
+    roles = recording_camera_roles(source, left_only=left_only)
+    sides = ("left",) if left_only else ("left", "right")
+    vector_size = 8 if left_only else 16
+    if left_only and (info.get("active_arms") != ["left"] or info.get("vector_size") != 8):
+        raise SystemExit("invalid single-left recording contract")
+    task = args.task or info.get("task") or "bimanual mushroom harvesting teleoperation"
     if not (source / "data" / "chunk-000" / "file-000.parquet").is_file():
         raise SystemExit(f"not a supported Jetson recording: {source}")
     if output.exists():
@@ -127,27 +152,28 @@ def main() -> None:
     if not rows:
         raise SystemExit("recording has no robot rows")
     for row in rows:
-        if len(row["observation.state"]) != 16 or len(row["action"]) != 16:
-            raise SystemExit("expected 16-D left[8] + right[8] state/action vectors")
+        if len(row["observation.state"]) != vector_size or len(row["action"]) != vector_size:
+            raise SystemExit(f"expected {vector_size}-D state/action vectors")
+        if not np.isfinite([row["timestamp"], *row["observation.state"], *row["action"]]).all():
+            raise SystemExit("non-finite robot sample")
 
-    indexes = {role: read_camera_index(source, role) for role in ROLES}
-    times = {role: [int(item["host_realtime_ns"]) for item in indexes[role]] for role in ROLES}
+    indexes = {role: read_camera_index(source, role) for role in roles}
+    times = {role: [int(item["host_realtime_ns"]) for item in indexes[role]] for role in roles}
     origin_ns, origin_source = recording_time_origin(source, times)
     offset_ns = int(args.camera_time_offset_ms * 1_000_000)
 
     target_ns = [origin_ns + int(float(row["timestamp"]) * 1_000_000_000) + offset_ns for row in rows]
-    selected: dict[str, list[dict]] = {role: [nearest(indexes[role], times[role], t) for t in target_ns] for role in ROLES}
+    selected: dict[str, list[dict]] = {role: [nearest(indexes[role], times[role], t) for t in target_ns] for role in roles}
     max_skew_ns = int(args.max_camera_skew_ms * 1_000_000)
-    skew = {role: [abs(int(frame["host_realtime_ns"]) - target) for frame, target in zip(selected[role], target_ns)] for role in ROLES}
+    skew = {role: [abs(int(frame["host_realtime_ns"]) - target) for frame, target in zip(selected[role], target_ns)] for role in roles}
     failures = {role: sum(value > max_skew_ns for value in values) for role, values in skew.items()}
     if any(failures.values()):
         raise SystemExit(f"camera matching exceeds {args.max_camera_skew_ms} ms: {failures}")
 
     # Do not create a partial official dataset until all alignment checks pass.
     episode = output / "episodes" / "0"
-    camera_dirs = {role: episode / "cameras" / CAMERA_NAMES[role] for role in ROLES}
-    for path in [episode / "obs" / "arms" / "right", episode / "obs" / "arms" / "left",
-                 episode / "action" / "arms" / "right", episode / "action" / "arms" / "left",
+    camera_dirs = {role: episode / "cameras" / CAMERA_NAMES[role] for role in roles}
+    for path in [*(episode / kind / "arms" / side for kind in ("obs", "action") for side in sides),
                  *camera_dirs.values()]:
         path.mkdir(parents=True, exist_ok=False)
 
@@ -159,11 +185,12 @@ def main() -> None:
         # directory, so split the staging vector using that actual contract.
         # Reversing these slices silently produces a structurally valid but
         # semantically unusable training dataset.
-        for side, values in (("left", vector[:, :8]), ("right", vector[:, 8:])):
+        for index, side in enumerate(sides):
+            values = vector[:, index * 8:(index + 1) * 8]
             frame = pd.DataFrame({"timestamp": timestamps, "qpos": list(values)})
             frame.to_parquet(episode / kind / "arms" / side / "state.parquet", index=False)
 
-    for role in ROLES:
+    for role in roles:
         for target, item in zip(target_ns, selected[role]):
             rgb = read_rgb(source, role, item)
             # OpenCV encodes BGR; raw Orbbec data is RGB.
@@ -174,10 +201,11 @@ def main() -> None:
             (camera_dirs[role] / f"{target}.jpeg").write_bytes(encoded.tobytes())
 
     with (output / "metadata.yaml").open("w", encoding="utf-8") as stream:
-        yaml.safe_dump(metadata(args.task, 30.0, args.success), stream, sort_keys=False, allow_unicode=True)
+        yaml.safe_dump(metadata(task, 30.0, args.success, left_only=left_only, camera_roles=roles), stream, sort_keys=False, allow_unicode=True)
     manifest = {
         "schema_version": 1,
         "source_recording": str(source),
+        "camera_roles": list(roles),
         "depth_storage": "source depth_raw/*.u16le with matching JSONL indexes; unmodified",
         "rgb_time_anchor": f"{origin_source} + LeRobot relative timestamp + camera_time_offset_ms",
         "robot_time_origin_ns": origin_ns,

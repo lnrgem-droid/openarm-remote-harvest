@@ -82,7 +82,7 @@ class ManualRecordingEndToEnd(unittest.TestCase):
                     # Synthetic writer receipt; no USB/camera service is used.
                     (dataset/'rgbd-complete.json').write_text(json.dumps(dict(
                         dataset_root=str(dataset), complete=True,
-                        written=dict(left_wrist=150, right_wrist=150, chest=150), dropped={})))
+                        written={f"{side}_wrist": 150, "chest": 150}, dropped={})))
                     if interrupted:
                         self.wait_until(lambda: recorder.phase == 'awaiting_result')
                         self.assertTrue(recorder.status()['running'])

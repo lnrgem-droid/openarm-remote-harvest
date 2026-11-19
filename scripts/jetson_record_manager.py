@@ -33,10 +33,24 @@ def synchronized(method):
     return call
 
 
+# Keep legacy groups readable without mixing their reversed arm roles into new data.
+TASK_GROUPS = {
+    "LEFT_PICK_ONE": "left_pick",
+    "RIGHT_PULL_LOG": "right_pull",
+    "RIGHT_PUSH_LOG": "right_push",
+    "LEFT_GRASP_LOG": "left",
+    "RIGHT_PICK_ONE": "right",
+}
+GROUP_SIDES = {"left_pick": "left", "right_pull": "right", "right_push": "right",
+               "left": "left", "right": "right"}
+EPISODE_GROUPS = (*GROUP_SIDES, "test")
+
+
 class Recorder:
     def __init__(self, root: Path, *, runtime_dir: Path | None = None, storage_root: Path | None = None) -> None:
         runtime_dir = runtime_dir or Path(os.environ.get("OPENARM_RGBD_RUNTIME", "/home/nvidia/openarm-rgbd-runtime"))
         self.root = root
+        self.camera_roles = getattr(self, "camera_roles", ("left_wrist", "right_wrist", "chest"))
         self.process: subprocess.Popen[bytes] | None = None
         self.pty_master: int | None = None
         self.started: float | None = None
@@ -55,10 +69,22 @@ class Recorder:
         self.session_root: Path | None = None
         self.session_id: str | None = None
         self.session_started: float | None = None
-        self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
+        self.next_episode_by_task = dict.fromkeys(EPISODE_GROUPS, 1)
         self.active_episode: dict | None = None
         self.last_episode: dict | None = None
         self.allowed_storage_root = storage_root or Path(os.environ.get("OPENARM_DATASET_ROOT", "/home/nvidia/datasets"))
+        self.storage_mountpoint = None
+        self.storage_uuid = None
+        storage_config = root / "config" / "recording_storage.json"
+        if storage_root is None and storage_config.exists():
+            config = json.loads(storage_config.read_text(encoding="utf-8"))
+            self.allowed_storage_root = Path(config["storage_root"])
+            self.storage_mountpoint = Path(config["mountpoint"])
+            self.storage_uuid = str(config["uuid"])
+            if (not self.allowed_storage_root.is_absolute() or not self.storage_mountpoint.is_absolute()
+                    or self.storage_mountpoint.resolve() not in self.allowed_storage_root.resolve().parents
+                    or not self.storage_uuid):
+                raise ValueError("移动硬盘保存配置无效")
         self.session_base = self.allowed_storage_root / "openarm_harvest_sessions"
         self.camera_status_path = Path("/tmp/openarm-rgbd-camera-status.json")
         self.session_state_path = runtime_dir / "active-session.json"
@@ -71,11 +97,33 @@ class Recorder:
             root = Path(state["session_root"])
             if not root.is_dir() or not (root / "episodes").is_dir():
                 return
-            self._load_session(root, recovery_episode=state.get("active_episode"))
+            self._load_session(root, recovery_episode=state.get("active_episode"),
+                               recovery_numbers=state.get("next_episode_by_task"))
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             return
 
+    def _storage_error(self) -> str | None:
+        if self.storage_mountpoint is None:
+            return None
+        try:
+            result = subprocess.run(
+                ["findmnt", "--json", "--target", str(self.storage_mountpoint),
+                 "--output", "TARGET,UUID"], capture_output=True, text=True, timeout=2, check=True)
+            mounted = json.loads(result.stdout)["filesystems"][0]
+            if (Path(mounted["target"]).resolve() == self.storage_mountpoint.resolve()
+                    and str(mounted.get("uuid", "")).lower() == self.storage_uuid.lower()):
+                return None
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
+            pass
+        return f"采集硬盘未就绪，请连接并挂载指定硬盘至 {self.storage_mountpoint}（UUID {self.storage_uuid}）"
+
+    def _require_storage(self) -> None:
+        error = self._storage_error()
+        if error:
+            raise ValueError(error)
+
     def _safe_storage_path(self, value: str | Path, *, create: bool = False) -> Path:
+        self._require_storage()
         path = Path(value).expanduser()
         if not path.is_absolute():
             raise ValueError("Jetson 保存目录必须使用绝对路径")
@@ -91,7 +139,35 @@ class Recorder:
             raise ValueError(f"目录不可写：{path}")
         return path
 
-    def _load_session(self, root: Path, *, recovery_episode: dict | None = None) -> None:
+    def _read_episode_sequence(self, root: Path) -> dict:
+        path = root / ".episode-sequence.json"
+        if not path.exists():
+            return {"schema_version": 1, "batch_uid": uuid.uuid4().hex, "next_episode_by_task": {}}
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(value, dict) or not isinstance(value.get("batch_uid"), str)
+                or not isinstance(value.get("next_episode_by_task"), dict)
+                or any(type(n) is not int or n < 1 for n in value["next_episode_by_task"].values())):
+            raise ValueError("批次编号账本损坏；请修复后继续，不能重用历史编号")
+        return value
+
+    def _persist_episode_sequence(self) -> None:
+        """Keep a durable high-water mark even after data is archived or deleted."""
+        value = self._read_episode_sequence(self.session_root)
+        numbers = value["next_episode_by_task"]
+        for group, number in self.next_episode_by_task.items():
+            numbers[group] = max(numbers.get(group, 1), number)
+        if self.active_episode:
+            group = self.active_episode.get("task_group") or self._task_group(str(self.active_episode.get("task", "")))
+            try:
+                number = int(self.active_episode.get("episode_number") or
+                             str(self.active_episode.get("episode_id", "")).rsplit("_", 1)[-1])
+            except (TypeError, ValueError):
+                number = self.next_episode_by_task.get(group, 1)
+            numbers[group] = max(numbers.get(group, 1), number + 1)
+        self._write_json(self.session_root / ".episode-sequence.json", value)
+
+    def _load_session(self, root: Path, *, recovery_episode: dict | None = None,
+                      recovery_numbers: dict | None = None) -> None:
         root = self._safe_storage_path(root)
         manifest_path = root / "session.json"
         episodes_root = root / "episodes"
@@ -100,13 +176,25 @@ class Recorder:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ValueError("采集批次元数据必须是 JSON 对象")
+        sequence = self._read_episode_sequence(root)
         self.session_root = root
         self.session_id = str(manifest.get("session_id") or root.name)
         self.session_started = float(manifest.get("session_started_unix_s") or root.stat().st_mtime)
         self.session_base = root.parent
         self.last_episode = None
         self.active_episode = None
-        self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
+        self.next_episode_by_task = dict.fromkeys(EPISODE_GROUPS, 1)
+        for numbers in (sequence["next_episode_by_task"], recovery_numbers or {}):
+            for group, number in numbers.items():
+                if group in self.next_episode_by_task and type(number) is int and number > 0:
+                    self.next_episode_by_task[group] = max(self.next_episode_by_task[group], number)
+        # Old sessions may still contain identities whose directories were removed.
+        for episode in manifest.get("episodes", []):
+            if not isinstance(episode, dict):
+                continue
+            group, number = episode.get("task_group"), episode.get("episode_number")
+            if group in self.next_episode_by_task and type(number) is int and number > 0:
+                self.next_episode_by_task[group] = max(self.next_episode_by_task[group], number + 1)
         pending = {}
         if isinstance(recovery_episode, dict):
             pending[str(recovery_episode.get("episode_root", ""))] = recovery_episode
@@ -167,6 +255,7 @@ class Recorder:
         self._persist_session()
 
     def session_catalog(self) -> dict:
+        self._require_storage()
         sessions = []
         allowed = self.allowed_storage_root.resolve()
         for manifest_path in allowed.rglob("session.json"):
@@ -177,7 +266,7 @@ class Recorder:
                     continue
                 if not (root / "episodes").is_dir():
                     continue
-                counts = {"left": 0, "right": 0}
+                counts = dict.fromkeys(GROUP_SIDES, 0)
                 for metadata in (root / "episodes").rglob("episode.json"):
                     try:
                         episode = json.loads(metadata.read_text(encoding="utf-8"))
@@ -211,6 +300,7 @@ class Recorder:
         if self.session_root is None:
             self.session_state_path.unlink(missing_ok=True)
             return
+        self._persist_episode_sequence()
         self._write_json(self.session_state_path, {
             "session_id": self.session_id, "session_root": str(self.session_root),
             "session_started_unix_s": self.session_started,
@@ -259,7 +349,12 @@ class Recorder:
                 cancelled_start = bool(self.stop_reason and self.stop_reason.endswith(" during startup"))
                 self.phase = "idle" if returncode in {None, 0} or cancelled_start else "error"
         free_gb = self._free_gb()
+        # Compute duration on the recorder host; the console clock may differ.
+        recording_start = (self.active_episode or {}).get("recording_started_unix_s")
+        recording_elapsed = (max(0.0, time.time() - float(recording_start))
+                             if self.phase == "recording" and recording_start is not None else None)
         return {"running": running, "phase": self.phase,
+                "recording_elapsed_s": recording_elapsed,
                 "recording_policy": "manual_result",
                 "recording_active": process_alive and self.phase == "recording",
                 "capture_interrupted": (self.active_episode or {}).get("capture_interrupted"),
@@ -273,9 +368,12 @@ class Recorder:
                 "active_episode": dict(self.active_episode) if self.active_episode else None,
                 "last_episode": dict(self.last_episode) if self.last_episode else None,
                 "task_statistics": self._task_statistics(),
+                "supported_tasks": list(TASK_GROUPS),
                 "camera_health": self._camera_health()}
 
     def _free_gb(self):
+        if self._storage_error():
+            return 0.0
         # A chosen directory may be a different mounted disk.
         path = self.session_root or self.allowed_storage_root
         while not path.exists() and path != path.parent:
@@ -289,8 +387,8 @@ class Recorder:
         makes the displayed counters recoverable and ensures only successfully
         finalized, valid episodes contribute to the large training counter.
         """
-        values = {"left": {"valid_success": 0, "failure": 0, "aborted": 0},
-                  "right": {"valid_success": 0, "failure": 0, "aborted": 0}}
+        values = {group: {"valid_success": 0, "failure": 0, "aborted": 0}
+                  for group in GROUP_SIDES}
         if self.session_root is None:
             return values
         for metadata in (self.session_root / "episodes").rglob("episode.json"):
@@ -301,8 +399,8 @@ class Recorder:
             except (OSError, json.JSONDecodeError):
                 continue
             task = str(episode.get("task", ""))
-            side = "left" if task.startswith("LEFT_GRASP_LOG") else "right" if task.startswith("RIGHT_PICK_ONE") else None
-            if side is None:
+            side = self._task_group(task)
+            if side not in values:
                 continue
             result = episode.get("result")
             if result == "success" and episode.get("valid") is True:
@@ -315,24 +413,33 @@ class Recorder:
 
     @staticmethod
     def _task_group(task: str) -> str:
-        if task.startswith("LEFT_GRASP_LOG"):
-            return "left"
-        if task.startswith("RIGHT_PICK_ONE"):
-            return "right"
+        for code, group in TASK_GROUPS.items():
+            if task == code or task.startswith(code + ". "):
+                return group
         return "test"
+
+    def _episode_camera_roles(self, task: str) -> list[str]:
+        # Test recordings exercise the same camera routing without a motion lock.
+        group = self._task_group(task.removeprefix("TEST_"))
+        side = GROUP_SIDES.get(group)
+        if side:
+            return [f"{side}_wrist", "chest"]
+        return list(self.camera_roles)
 
     def _camera_health(self) -> dict:
         try:
             value = json.loads(self.camera_status_path.read_text(encoding="utf-8"))
             age_s = time.time() - float(value.get("updated_unix_s", 0))
             cameras = value.get("cameras", {})
-            healthy = 0 <= age_s <= 5 and set(cameras) == {"left_wrist", "right_wrist", "chest"} and all(
-                bool(cameras[role].get("healthy")) for role in cameras)
+            healthy = 0 <= age_s <= 5 and set(self.camera_roles).issubset(cameras) and all(
+                bool(cameras[role].get("healthy")) for role in self.camera_roles)
             return {"ok": healthy, "age_s": round(age_s, 1), "detail": value}
         except Exception as exc:
             return {"ok": False, "age_s": None, "error": str(exc)}
 
     def _write_json(self, path: Path, value: dict) -> None:
+        if self.allowed_storage_root.resolve() in path.resolve().parents:
+            self._require_storage()
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -341,6 +448,8 @@ class Recorder:
     def _write_session_manifest(self) -> None:
         if self.session_root is None:
             return
+        manifest_path = self.session_root / "session.json"
+        previous = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
         episodes = []
         for metadata in sorted((self.session_root / "episodes").rglob("episode.json")):
             try:
@@ -357,12 +466,16 @@ class Recorder:
                 "lossless RGB-D sidecars; convert and validate before official training."
             ),
             "episode_layout": {
+                "left_pick": "episodes/left_pick/episode_NNNN",
+                "right_pull": "episodes/right_pull/episode_NNNN",
+                "right_push": "episodes/right_push/episode_NNNN",
                 "left": "episodes/left/episode_NNNN",
                 "right": "episodes/right/episode_NNNN",
                 "test": "episodes/test/episode_NNNN (not formal training data)",
             },
-            "camera_roles": ["left_wrist", "right_wrist", "chest"],
+            "camera_roles": list(self.camera_roles),
             "episodes": episodes,
+            "archives": previous.get("archives", []),
         })
 
     def _drain_loop(
@@ -414,6 +527,10 @@ class Recorder:
                 with self._lock:
                     if self._stop_requested.is_set() or generation != self._generation:
                         return
+                    roles = (self.active_episode or {}).get("camera_roles", list(self.camera_roles))
+                    self._write_json(dataset_path / "capture-config.json", {
+                        "schema_version": 1, "camera_roles": roles,
+                    })
                     temporary = self.active_marker.with_suffix(".tmp")
                     temporary.write_text(str(dataset_path) + "\n", encoding="utf-8")
                     temporary.replace(self.active_marker)
@@ -448,18 +565,20 @@ class Recorder:
             pass
         spool_written = spool.get("written", {})
         spool_drop = spool.get("dropped", {})
-        frame_values = [int(spool_written.get(role, 0)) for role in ("left_wrist", "right_wrist", "chest")]
+        roles = episode.get("camera_roles", list(self.camera_roles))
+        frame_values = [int(spool_written.get(role, 0)) for role in roles]
         frame_spread = max(frame_values) - min(frame_values) if frame_values else 0
         # "valid" is a collection eligibility flag, not a claim that the
         # grasp succeeded.  A successful operator label is necessary but not
-        # sufficient: all three source streams must have frames, be healthy,
+        # sufficient: all selected source streams must have frames, be healthy,
         # and report no camera-owner queue loss.  Full OpenArm validation and
         # RGB-D-to-LeRobot conversion remain an explicit offline step.
         valid = (result == "success" and not episode.get("capture_interrupted")
                  and returncode == 0 and spool.get("complete") is True
                  and spool.get("dataset_root") == str(dataset)
                  and min(frame_values, default=0) >= 30
-                 and all(int(spool_drop.get(role, 0)) == 0 for role in ("left_wrist", "right_wrist", "chest")))
+                 and set(spool_written) == set(roles)
+                 and all(int(spool_drop.get(role, 0)) == 0 for role in roles))
         episode.update({
             "ended_unix_s": ended,
             "startup_duration_s": round(max(0.0, recording_start - requested_start), 3),
@@ -510,6 +629,20 @@ class Recorder:
         if "error" in result:
             raise RuntimeError(result["error"])
         return result
+
+    def _recording_motion_valid(self, motion):
+        lease = motion.get("collection", {}).get("recording") or {}
+        return (motion.get("state") == "RUNNING" and not motion.get("fault_bits")
+                and lease.get("token") == self.motion_token)
+
+    def _acquire_motion_lock(self, task_group, token):
+        fields = {"side": GROUP_SIDES[task_group], "token": token}
+        if task_group in {"left_pick", "right_pull", "right_push"}:
+            capability = self._motion_request("status").get("collection", {})
+            if capability.get("split_log_tasks_supported") is not True:
+                raise RuntimeError("控制器尚未支持左臂采摘/右臂分段采集，请更新并重启遥操")
+            fields["task"] = next(code for code, group in TASK_GROUPS.items() if group == task_group)
+        return self._motion_request("collection_begin", **fields)
 
     def _release_motion_lock(self):
         if self.motion_token:
@@ -624,6 +757,10 @@ class Recorder:
         """Stop on low disk, camera/spool error, or deletion of an active root."""
         root_seen = False
         while process.poll() is None and generation == self._generation:
+            storage_error = self._storage_error()
+            if storage_error:
+                self._request_stop(storage_error)
+                return
             root_seen = root_seen or dataset_path.exists()
             if root_seen and not dataset_path.exists():
                 self._request_stop("dataset directory was removed while recording")
@@ -647,7 +784,7 @@ class Recorder:
                 try:
                     motion = self._motion_request("status")
                     lease = motion.get("collection", {}).get("recording") or {}
-                    if motion.get("state") != "RUNNING" or motion.get("fault_bits") or lease.get("token") != self.motion_token:
+                    if not self._recording_motion_valid(motion):
                         self._request_stop("automatic stop: collection motion control lost")
                         return
                 except (OSError, ValueError, RuntimeError):
@@ -657,8 +794,12 @@ class Recorder:
             if self._stop_requested.is_set():
                 return
 
+    def _recorder_command(self):
+        return [str(self.root / "scripts" / "record_jetson_rgbd_dataset.sh")]
+
     @synchronized
     def start(self, *, dataset_root: str | None = None, task: str | None = None) -> dict:
+        self._require_storage()
         if (self.process is not None and self.process.poll() is None) or getattr(self, "_finalizing", False) or self.phase == "awaiting_result":
             return {"ok": False, "error": "recording is already running", **self.status()}
         free_gb = self._free_gb()
@@ -668,7 +809,10 @@ class Recorder:
             stamp = time.strftime("%Y%m%d_%H%M%S")
             self.dataset_root = str(self.allowed_storage_root / f"openarm_rgbd_{stamp}")
         else:
-            self.dataset_root = dataset_root
+            destination = Path(dataset_root).resolve()
+            if self.allowed_storage_root.resolve() not in destination.parents:
+                raise ValueError(f"保存目录必须位于 {self.allowed_storage_root} 内")
+            self.dataset_root = str(destination)
         self._generation += 1
         generation = self._generation
         self._stop_requested.clear()
@@ -686,7 +830,7 @@ class Recorder:
             # paths. Make this explicit for manager-spawned (non-shell) jobs.
             "PYTHONPATH": plugin_root + (":" + python_path if python_path else ""),
         }
-        command = [str(self.root / "scripts" / "record_jetson_rgbd_dataset.sh")]
+        command = self._recorder_command()
         # Prepare all log files before spawning. A permissions/disk error must
         # not leave a live child with no cleanup or stop-monitor threads.
         try:
@@ -745,7 +889,7 @@ class Recorder:
         else:
             self.session_base = self._safe_storage_path(self.session_base, create=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        self.session_id = f"mushroom_harvest_{stamp}"
+        self.session_id = f"{getattr(self, 'session_prefix', 'mushroom_harvest')}_{stamp}"
         self.session_root = self.session_base / self.session_id
         suffix = 1
         while self.session_root.exists():
@@ -753,12 +897,12 @@ class Recorder:
             suffix += 1
         self.session_id = self.session_root.name
         self.session_started = time.time()
-        self.next_episode_by_task = {"left": 1, "right": 1, "test": 1}
+        self.next_episode_by_task = dict.fromkeys(EPISODE_GROUPS, 1)
         self.last_episode = None
         self.session_root.mkdir(parents=True, exist_ok=False)
         episodes_root = self.session_root / "episodes"
         episodes_root.mkdir()
-        for group in ("left", "right", "test"):
+        for group in EPISODE_GROUPS:
             (episodes_root / group).mkdir()
         self._write_session_manifest()
         self._persist_session()
@@ -766,6 +910,7 @@ class Recorder:
 
     @synchronized
     def start_episode(self, task: str, target: str = "") -> dict:
+        self._require_storage()
         current = self.status()
         if current["running"] or self.active_episode is not None or self.phase in {"starting", "recording", "stopping"}:
             return {"ok": False, "error": "another episode is already active or finalizing", **current}
@@ -778,11 +923,11 @@ class Recorder:
             return {"ok": False, "error": "three RGB-D cameras are not healthy", **self.status()}
         task_group = self._task_group(task)
         motion = None
-        if task_group in {"left", "right"}:
+        if task_group in GROUP_SIDES:
             self._release_motion_lock()
             token = uuid.uuid4().hex
             try:
-                motion = self._motion_request("collection_begin", side=task_group, token=token)
+                motion = self._acquire_motion_lock(task_group, token)
                 self.motion_token = token
             except (OSError, ValueError, RuntimeError) as exc:
                 # An acknowledgement can be lost after the lock was acquired.
@@ -811,8 +956,10 @@ class Recorder:
         self.active_episode = {
             "schema_version": 2, "episode_id": episode_id,
             "episode_number": episode_number, "task_group": task_group,
+            "arm_side": GROUP_SIDES.get(task_group),
             "episode_root": str(episode_root), "lerobot_root": str(dataset_root),
             "task": task, "target": target, "started_unix_s": time.time(),
+            "camera_roles": self._episode_camera_roles(task),
             "camera_health_at_start": health, "result": None, "valid": None,
             "failure_code": None,
             "collection_motion_at_start": motion.get("collection") if motion else None,

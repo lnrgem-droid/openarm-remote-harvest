@@ -14,7 +14,7 @@ if not LAUNCHER.exists():
 class PendingRecordingLauncherTest(unittest.TestCase):
     def check_gate(self, replies, commands):
         source = LAUNCHER.read_text().split('ensure_recording_idle() {', 1)[1]
-        code = source[source.index('import time, zmq\n'):source.index("\nPY'")]
+        code = source[source.index('import time, zmq\n'):source.index("\nPY\n")]
         sent = []
         pending = iter(replies)
         class Socket:

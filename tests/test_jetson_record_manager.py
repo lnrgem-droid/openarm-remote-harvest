@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -26,6 +27,19 @@ manager.Recorder = IsolatedRecorder
 
 
 class RecorderLayoutTest(unittest.TestCase):
+    def test_elapsed_is_computed_on_recorder_and_excludes_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = manager.Recorder(Path(temporary))
+            recorder.active_episode = {'started_unix_s': 90}
+            recorder.phase = 'starting'
+            self.assertIsNone(recorder.status()['recording_elapsed_s'])
+            recorder.active_episode['recording_started_unix_s'] = 100
+            recorder.phase = 'recording'
+            with patch.object(manager.time, 'time', return_value=100.4):
+                self.assertAlmostEqual(recorder.status()['recording_elapsed_s'], .4)
+            recorder.phase = 'stopping'
+            self.assertIsNone(recorder.status()['recording_elapsed_s'])
+
     def test_motion_rejection_creates_no_episode_and_does_not_advance_number(self):
         manager.shutil.disk_usage = lambda _path: type("Usage", (), {"free": 100 * 1024 ** 3})()
         with tempfile.TemporaryDirectory() as temporary:

@@ -36,7 +36,8 @@ class FakeControl:
         self.value = {
             "ok": True, "running": False, "phase": "idle", "session_id": None,
             "free_gb": 100.0, "camera_health": {"ok": True},
-            "next_episode_by_task": {"left": 1, "right": 1, "test": 1},
+            "next_episode_by_task": {group: 1 for group in (*ui.TASK_GROUPS.values(), "test")},
+            "supported_tasks": [task[0] for task in ui.TASKS.values()],
             "task_statistics": {"left": {}, "right": {}}, "active_episode": None,
         }
 
@@ -47,7 +48,7 @@ class FakeControl:
         if command == "session_start":
             self.value["session_id"] = "simulation"
         elif command == "episode_start":
-            side = next(side for side, task in ui.TASKS.items() if task[0] == extra["task"])
+            side = next(ui.TASK_GROUPS[key] for key, task in ui.TASKS.items() if task[0] == extra["task"])
             number = self.value["next_episode_by_task"][side]
             self.value.update(running=True, phase="recording", active_episode={
                 "task": extra["task"], "task_group": side, "episode_number": number,
@@ -93,7 +94,7 @@ class FakeTeleop:
         self.stop = threading.Event()
         self.value = {"state": "RUNNING", "fault_bits": 0, "last_running_age_s": 0.0,
                       "teleop_ready": True,
-                      "collection": {"left_mode": "FOLLOW", "right_mode": "FOLLOW"}}
+                      "collection": {"split_log_tasks_supported": True, "independent_log_recording_supported": True, "left_mode": "FOLLOW", "right_mode": "FOLLOW"}}
         self.pending = False
         self.request_error = ""
         self.results = ui.queue.Queue()
@@ -124,7 +125,7 @@ def master_ready_status():
     goal[6] = .2
     return {'state': 'RUNNING', 'fault_bits': 0, 'teleop_ready': True, 'connected': True,
             'action_age_ms': 1., 'feedback_age_ms': 2., 'leader_axes': [0.] * 16, 'applied_axes': goal,
-            'collection': {'left_mode': 'HOLD', 'right_mode': 'FOLLOW', 'recording': None,
+            'collection': {'split_log_tasks_supported': True, 'independent_log_recording_supported': True, 'left_mode': 'HOLD', 'right_mode': 'FOLLOW', 'recording': None,
                 'left_align_active': False, 'left_align_phase': 'idle', 'left_align_supported': True,
                 'left_alignment_error_rad': .2, 'transitioning_arms': [],
                 'left_master_align_supported': True, 'left_master_align_active': False,
@@ -182,8 +183,12 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.app.on_start_teleop()
         self.assertEqual(calls, [])
         self.app.teleop.value["teleop_ready"] = False
-        with patch.object(ui.messagebox, "askyesno", return_value=False):
+        with patch.object(ui.messagebox, "askyesno", return_value=False) as confirm:
             self.app.on_start_teleop()
+            self.assertEqual(confirm.call_args.kwargs['default'], 'no')
+            self.assertIn('先停止并失能', confirm.call_args.args[1])
+            self.assertIn('失能时不会坠落', confirm.call_args.args[1])
+            self.assertIn('左右 CAN 线已恢复原接法', confirm.call_args.args[1])
         self.assertEqual(calls, [])
 
     def test_start_waits_for_save_then_locks_controls_until_verified(self):
@@ -344,7 +349,7 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.app.target_confirmed.set(True)
         self.app.on_start('right')
         warning = self.warnings[-1][1]
-        self.assertIn('左臂已经保持，无需恢复左臂跟随', warning)
+        self.assertIn('不要求左臂保持', warning)
         self.assertIn('右侧“解除右主臂回位伺服”', warning)
         self.assertEqual(self.app.motion_buttons['right_master_align'].cget('text'), '主臂自动对齐并恢复右臂跟随')
         self.assertFalse(self.app.teleop.calls)
@@ -401,12 +406,27 @@ class ConsoleSimulationTest(unittest.TestCase):
             self.assertNotIn('请将右主臂', reason)
             self.assertNotIn('请点击右侧', reason)
 
-    def test_right_recording_when_left_follows_only_requests_left_hold(self):
+    def test_right_recording_accepts_left_follow_without_motion_commands(self):
         self.app.right_ready.set(True)
-        self.app.target_confirmed.set(True)
+        self.app.target_confirmed.set(False)
         self.app.on_start('right')
-        self.assertIn('左侧“保持左臂及夹爪”', self.warnings[-1][1])
-        self.assertNotIn('自动对齐', self.warnings[-1][1])
+        self.assertEqual(self.app.control.calls[-1], ('episode_start', {'task': 'RIGHT_PULL_LOG', 'target': ''}))
+        self.assertFalse(self.warnings)
+        self.assertFalse(self.app.teleop.calls)
+
+    def test_old_runtime_explains_restart_for_independent_right_recording(self):
+        self.app.right_ready.set(True)
+        self.app.teleop.value['collection'].pop('independent_log_recording_supported')
+        self.app.on_start('right')
+        self.assertIn('更新尚未加载', self.warnings[-1][1])
+        self.assertFalse(any(c[0] == 'episode_start' for c in self.app.control.calls))
+
+    def test_left_pick_accepts_right_hold_without_releasing_gripper(self):
+        self.app.left_ready.set(True)
+        self.app.target_confirmed.set(True)
+        self.app.teleop.value['collection']['right_mode'] = 'HOLD'
+        self.app.on_start('left')
+        self.assertEqual(self.app.control.calls[-1], ('episode_start', {'task': 'LEFT_PICK_ONE', 'target': ''}))
         self.assertFalse(self.app.teleop.calls)
 
     def right_release_ready(self):
@@ -746,9 +766,10 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.assertEqual(self.app.teleop.calls, ["left_lock"])
         self.app.control.value.update(running=False, phase="idle")
         self.app.right_ready.set(True); self.app.target_confirmed.set(True)
+        self.app.teleop.value["collection"]["right_mode"] = "HOLD"
         self.app.on_start("right")
         self.assertNotEqual(self.app.control.calls[-1][0], "episode_start")
-        self.app.teleop.value["collection"].update(left_mode="HOLD", saved={}, right_ready_error_rad=.02)
+        self.app.teleop.value["collection"].update(left_mode="FOLLOW", right_mode="FOLLOW", saved={}, right_ready_error_rad=.02)
         self.app.teleop.value["collection"]["transitioning_arms"] = ["right"]
         self.app.on_start("right")
         self.assertNotEqual(self.app.control.calls[-1][0], "episode_start")
@@ -992,6 +1013,158 @@ class ConsoleSimulationTest(unittest.TestCase):
                     self.assertTrue(self.root.winfo_exists())
                     self.assertFalse(self.app.close_requested)
 
+    def test_cleanup_cancel_never_submits_or_starts(self):
+        self.app.teleop.value['teleop_ready'] = False
+        with patch.object(ui.messagebox, 'askyesno', return_value=False), \
+             patch.object(self.app.reboot_cleanup, 'start') as submit, \
+             patch.object(self.app.teleop_start, 'start') as start:
+            self.app.on_reboot_cleanup()
+        submit.assert_not_called(); start.assert_not_called()
+        self.assertFalse(self.app.teleop_start_busy)
+
+    def test_recovery_guide_is_read_only_and_reuses_one_window(self):
+        previous = list(self.app.control.calls)
+        with patch.object(self.app.reboot_cleanup, 'start') as cleanup, \
+             patch.object(self.app.teleop_start, 'start') as start:
+            self.app.show_teleop_recovery()
+            window = self.app.recovery_help_dialog
+            self.app.show_teleop_recovery()
+            self.assertIs(self.app.recovery_help_dialog, window)
+            cleanup.assert_not_called(); start.assert_not_called()
+        self.assertEqual(previous, self.app.control.calls)
+        self.assertEqual(self.app.teleop.calls, [])
+
+    def test_failed_start_opens_guide_with_actual_reason(self):
+        self.app.teleop.value['teleop_ready'] = False
+        self.app.teleop_start.events.put(dict(event='complete', ok=False,
+            message='从端仍有旧会话；请先关闭电机电源'))
+        with patch.object(self.app.reboot_cleanup, 'start') as cleanup, \
+             patch.object(self.app.teleop_start, 'start') as start:
+            self.app.poll_teleop_start()
+            self.assertTrue(self.app.recovery_help_dialog.winfo_exists())
+            self.assertIn('从端仍有旧会话', self.app.lifecycle_message.get())
+            self.assertTrue(self.app.power_down_locked)
+            cleanup.assert_not_called(); start.assert_not_called()
+
+    def test_recovery_guide_prefers_powered_stop_and_uses_existing_confirmation(self):
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        with patch.object(self.app, 'on_power_down') as stop, \
+             patch.object(self.app.reboot_cleanup, 'start') as cleanup:
+            self.app.show_teleop_recovery()
+            widgets = list(descendants(self.app.recovery_help_dialog))
+            buttons = {str(w.cget('text')): w for w in widgets if isinstance(w, tk.Button)}
+            text = ''.join(w.get('1.0', 'end') for w in widgets if isinstance(w, tk.Text))
+            self.assertLess(text.index('优先保持供电恢复'), text.index('才使用断电清理'))
+            self.assertIn('USB 盒亮灯不代表电机已通电', text)
+            self.assertIn('互换测试后必须恢复', text)
+            stop.assert_not_called(); cleanup.assert_not_called()
+            buttons['停止遥操并失能…'].invoke()
+            stop.assert_called_once(); cleanup.assert_not_called()
+
+    def test_cleanup_confirm_locks_controls_and_never_claims_disabled_or_ready(self):
+        self.app.teleop.value['teleop_ready'] = False
+        with patch.object(ui.messagebox, 'askyesno', return_value=True) as confirm, \
+             patch.object(self.app.reboot_cleanup, 'start', return_value=True) as submit, \
+             patch.object(self.app.teleop_start, 'start') as start:
+            self.app.on_reboot_cleanup(); self.app.on_reboot_cleanup()
+            self.app._tick_once()
+            self.assertEqual(self.app.teleop_start_button.cget('state'), 'disabled')
+            self.assertEqual(self.app.reboot_cleanup_button.cget('state'), 'disabled')
+            self.assertEqual(self.app.close_button.cget('state'), 'disabled')
+            self.assertEqual(self.app.power_down_button.cget('state'), 'disabled')
+            self.app.reboot_cleanup.events.put(dict(event='complete', ok=True, message='旧会话已清理'))
+            self.app._tick_once()
+            start.assert_not_called(); submit.assert_called_once()
+            self.assertEqual(confirm.call_args.kwargs['default'], 'no')
+        self.assertFalse(self.app.teleop_start_busy)
+        self.assertFalse(self.app.power_down_succeeded)
+        self.assertTrue(self.app.power_down_locked)
+        self.assertEqual(self.app.teleop_start_button.cget('state'), 'normal')
+        self.assertIn('旧会话已清理', self.app.lifecycle_message.get())
+
+    def test_cleanup_blocks_live_session_and_recording(self):
+        with patch.object(self.app.reboot_cleanup, 'start') as submit:
+            self.app.on_reboot_cleanup()
+            self.app.teleop.value['teleop_ready'] = False
+            self.app.control.value.update(running=True, phase='recording')
+            self.app.on_reboot_cleanup()
+            submit.assert_not_called()
+
+    def test_cleanup_rechecks_after_modal_and_failure_stays_locked(self):
+        self.app.teleop.value['teleop_ready'] = False
+        def change(*args, **kwargs):
+            self.app.control.value.update(running=True, phase='recording')
+            return True
+        with patch.object(ui.messagebox, 'askyesno', side_effect=change), \
+             patch.object(self.app.reboot_cleanup, 'start') as submit:
+            self.app.on_reboot_cleanup()
+            submit.assert_not_called()
+        self.app.reboot_cleanup.events.put(dict(event='complete', ok=False, message='清理未确认'))
+        self.app.poll_teleop_start()
+        self.assertTrue(self.app.power_down_locked)
+        self.assertFalse(self.app.power_down_succeeded)
+
+    def test_standard_home_buttons_send_independent_commands(self):
+        self.app.teleop.value['collection'].update(standard_home_supported=True,
+            standard_home={'busy': False, 'phase': 'idle', 'side': None})
+        self.app._tick_once()
+        for side in ['left', 'right']:
+            self.assertEqual(self.app.motion_buttons[side+'_home'].cget('state'), 'normal')
+            self.app.motion_buttons[side+'_home'].invoke()
+            self.assertEqual(self.app.teleop.calls[-1], side+'_home')
+
+    def test_standard_home_blocks_recording_and_keeps_stop_on_disconnect(self):
+        self.app.teleop.value['collection'].update(standard_home_supported=True,
+            standard_home={'busy': True, 'phase': 'moving', 'side': 'left'})
+        self.app.teleop.value.update(connected=False, teleop_ready=False,
+                                    standard_home_uncertain_side='left')
+        self.app._tick_once()
+        self.assertEqual(self.app.motion_buttons['left_home_stop'].cget('state'), 'normal')
+        self.assertEqual(self.app.start_left_button.cget('state'), 'disabled')
+        self.app.motion_buttons['left_home_stop'].invoke()
+        self.assertEqual(self.app.teleop.calls[-1], 'left_home_stop')
+        before = len(self.app.control.calls)
+        self.app.on_start('left')
+        self.assertEqual(len(self.app.control.calls), before)
+
+    def test_standard_home_cannot_start_during_episode_or_on_old_controller(self):
+        self.app.on_motion('left_home')
+        self.assertEqual(self.app.teleop.calls, [])
+        self.app.teleop.value['collection']['standard_home_supported'] = True
+        self.app.control.value['active_episode'] = {'episode_id': 'unfinished'}
+        self.app.on_motion('right_home')
+        self.assertEqual(self.app.teleop.calls, [])
+
+    def test_home_hold_cannot_be_hidden_by_session_ready_message(self):
+        self.app.teleop.value['collection'].update(right_mode='HOLD',
+            standard_home={'side': 'right', 'phase': 'alignment_required', 'busy': False,
+                           'message': '主从臂未对齐；请对齐后恢复跟随'})
+        self.app.set_notice('会话就绪', 30)
+        self.app._tick_once()
+        self.assertIn('右臂保持（不可遥操）', self.app.status_var.get())
+        self.assertIn('未对齐', self.app.message_var.get())
+        self.assertNotIn('会话就绪', self.app.message_var.get())
+
+    def test_home_handover_is_visible_and_stoppable(self):
+        self.app.teleop.value['collection'].update(right_mode='HOLD', standard_home_supported=True,
+            standard_home={'side': 'right', 'phase': 'handover', 'busy': True,
+                           'message': '正在低速接回跟随'})
+        self.app._tick_once()
+        self.assertIn('右臂正在接回跟随', self.app.status_var.get())
+        self.assertEqual(self.app.motion_buttons['right_home_stop'].cget('state'), 'normal')
+        self.assertEqual(self.app.start_right_button.cget('state'), 'disabled')
+
+    def test_old_completed_home_does_not_hide_next_saved_pose_return(self):
+        self.app.teleop.value['collection'].update(right_mode='RETURNING', return_phase='moving',
+            standard_home={'side': 'right', 'phase': 'completed', 'busy': False,
+                           'message': '标准回位及交接完成，已恢复遥操跟随'})
+        self.app._tick_once()
+        self.assertIn('右臂低速回位中', self.app.status_var.get())
+        self.assertNotIn('交接完成', self.app.motion_vars['right'].get())
+
     def setUp(self) -> None:
         status_probe = patch.object(ui.TeleopStatusClient, "start", return_value=True)
         status_probe.start()
@@ -1003,7 +1176,7 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.errors: list[tuple[str, str]] = []
         ui.messagebox.showwarning = lambda title, body: self.warnings.append((title, body))
         ui.messagebox.showerror = lambda title, body: self.errors.append((title, body))
-        ui.messagebox.askyesno = lambda *_args: True
+        ui.messagebox.askyesno = lambda *_args, **_kwargs: True
         self.root = tk.Tk(); self.root.withdraw(); self.root.tk.call("tk", "scaling", 1.0)
         self.app = ui.MushroomCollectionApp(self.root, Args())
         self.app._tick_once()
@@ -1017,7 +1190,7 @@ class ConsoleSimulationTest(unittest.TestCase):
     def test_complete_operator_state_matrix(self) -> None:
         control = self.app.control
         self.assertIn("0001", self.app.start_left_button.cget("text"))
-        self.assertIn("episodes/left/episode_0001", self.app.storage_vars["left"].get())
+        self.assertIn("episodes/left_pick/episode_0001", self.app.storage_vars["left"].get())
         self.assertEqual(self.app.success_button.cget("state"), "disabled")
 
         self.app.on_result("success")
@@ -1026,7 +1199,7 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.app.start_left_button.invoke()
         self.assertTrue(self.warnings and "READY" in self.warnings[-1][1])
         before = len(control.calls)
-        self.app.left_ready.set(True); self.app.start_left_button.invoke()
+        self.app.left_ready.set(True); self.app.target_confirmed.set(True); self.app.start_left_button.invoke()
         self.assertEqual(control.calls[-1][0], "episode_start")
         self.assertGreater(len(control.calls), before)
 
@@ -1060,21 +1233,58 @@ class ConsoleSimulationTest(unittest.TestCase):
         control.pending = True; before = len(control.calls); self.app.start_left_button.invoke()
         self.assertEqual(len(control.calls), before)
 
-    def test_right_episode_requires_ready_target_and_healthy_cameras(self) -> None:
+    def test_left_episode_requires_ready_target_and_healthy_cameras(self) -> None:
         control = self.app.control
-        self.app.start_right_button.invoke()
+        self.app.start_left_button.invoke()
         self.assertTrue(self.warnings and "READY" in self.warnings[-1][0])
 
-        self.app.right_ready.set(True)
-        self.app.start_right_button.invoke()
+        self.app.left_ready.set(True)
+        self.app.start_left_button.invoke()
         self.assertTrue(self.warnings and "目标" in self.warnings[-1][0])
 
         self.app.target_confirmed.set(True)
         control.value["camera_health"] = {"ok": False}
         before = len(control.calls)
-        self.app.start_right_button.invoke()
+        self.app.start_left_button.invoke()
         self.assertEqual(len(control.calls), before)
         self.assertTrue(self.warnings and "不能开始" in self.warnings[-1][0])
+
+    def test_right_phase_switch_requires_new_ready_and_keeps_counts_separate(self):
+        control = self.app.control
+        self.app.teleop.value["collection"].update(left_mode="HOLD", right_mode="FOLLOW",
+            saved=None, right_ready_error_rad=None)
+        self.app.target_confirmed.set(False)  # Mushroom target confirmation belongs to left only.
+        self.app.right_ready.set(True)
+        self.app.start_right_button.invoke()
+        self.assertEqual(control.value["active_episode"]["task"], "RIGHT_PULL_LOG")
+        self.app._tick_once()
+        self.app.right_task_buttons[1].invoke()
+        self.assertEqual(self.app.right_task.get(), "right")
+        self.app.on_result("success"); self.app._tick_once()
+        self.app.right_task_buttons[1].invoke()
+        self.assertEqual(self.app.right_task.get(), "right_push")
+        self.assertFalse(self.app.right_ready.get())
+        self.assertIn("right_push/episode_0001", self.app.storage_vars["right"].get())
+        self.app.start_right_button.invoke()
+        self.assertFalse(control.value["running"])
+        self.app.right_ready.set(True); self.app.start_right_button.invoke()
+        self.assertEqual(control.value["active_episode"]["task"], "RIGHT_PUSH_LOG")
+        self.assertEqual(control.value["active_episode"]["episode_number"], 1)
+        self.app.on_result("failure"); self.app._tick_once()
+        self.assertEqual(control.value["next_episode_by_task"]["right_pull"], 2)
+        self.assertEqual(control.value["next_episode_by_task"]["right_push"], 2)
+        self.assertEqual(control.value["next_episode_by_task"]["left_pick"], 1)
+
+    def test_old_manager_or_controller_blocks_new_tasks(self):
+        self.app.left_ready.set(True); self.app.target_confirmed.set(True)
+        for component in ("manager", "controller"):
+            with self.subTest(component=component):
+                self.app.control.value["supported_tasks"] = ([] if component == "manager"
+                    else [task[0] for task in ui.TASKS.values()])
+                self.app.teleop.value["collection"]["split_log_tasks_supported"] = component != "controller"
+                self.app.on_start("left")
+                self.assertFalse(self.app.control.value["running"])
+                self.assertIn("更新 Jetson", self.warnings[-1][1])
 
     def test_notice_survives_refresh_and_rejected_close_stays_open(self) -> None:
         control = self.app.control
@@ -1108,19 +1318,20 @@ class ConsoleSimulationTest(unittest.TestCase):
         self.assertIn("中断", self.app.chest_image.cget("text"))
 
     def prepare_recording(self, side):
+        self.app.right_task.set("right_push" if side == "right_push" else "right")
         self.app.control.value.update(running=False, phase="idle", active_episode=None)
-        self.app.control.value["next_episode_by_task"][side] = 4
+        self.app.control.value["next_episode_by_task"][ui.TASK_GROUPS[side]] = 4
         self.app.teleop.value = {"state": "RUNNING", "fault_bits": 0, "last_running_age_s": 0.,
-            "collection": {"left_mode": "HOLD" if side == "right" else "FOLLOW",
+            "collection": {"split_log_tasks_supported": True, "independent_log_recording_supported": True, "left_mode": "FOLLOW" if side == "left" else "HOLD",
                 "right_mode": "FOLLOW", "right_ready_error_rad": .02, "transitioning_arms": []}}
         self.app.left_ready.set(True); self.app.right_ready.set(True); self.app.target_confirmed.set(True)
-        self.app.on_start(side)
+        self.app.on_start("left" if side == "left" else "right")
         self.app._tick_once()
         self.assertTrue(self.app.control.value["running"])
         self.assertEqual(self.app.control.value["active_episode"]["episode_number"], 4)
 
     def test_diagnostic_outage_never_stops_recording_and_manual_result_sends_once(self):
-        for side in ("left", "right"):
+        for side in ("left", "right", "right_push"):
             for result in ("success", "failure"):
                 for diagnostic in ("DISCONNECTED", "HEALTH_STALE", "FAULT", "REINITIALIZE_REQUIRED"):
                     with self.subTest(side=side, result=result, diagnostic=diagnostic):
@@ -1145,26 +1356,26 @@ class ConsoleSimulationTest(unittest.TestCase):
                             "failure_code": "operator_marked_failure" if result == "failure" else ""})])
 
     def test_active_episode_number_stays_visible_until_operator_saves(self):
-        for side in ("left", "right"):
+        for side in ("left", "right", "right_push"):
             with self.subTest(side=side):
                 self.prepare_recording(side)
                 arm = "左" if side == "left" else "右"
-                button = getattr(self.app, "start_" + side + "_button")
+                button = self.app.start_left_button if side == "left" else self.app.start_right_button
                 # Even an older manager's advanced counter cannot replace the
                 # current episode shown while that episode remains open.
-                self.app.control.value["next_episode_by_task"][side] = 5
+                self.app.control.value["next_episode_by_task"][ui.TASK_GROUPS[side]] = 5
                 self.app._tick_once()
-                self.assertEqual(button.cget("text"), f"正在录制{arm}臂｜第0004条")
-                self.assertIn("当前第 0004 条", self.app.count_vars[side].get())
-                self.assertIn("episode_0004", self.app.storage_vars[side].get())
-                self.assertNotIn("下一条", self.app.count_vars[side].get())
+                self.assertEqual(button.cget("text"), f"正在录制{ui.TASKS[side][1].replace(chr(0xff5c), chr(0xb7))}｜第0004条")
+                self.assertIn("当前第 0004 条", self.app.count_vars["left" if side == "left" else "right"].get())
+                self.assertIn("episode_0004", self.app.storage_vars["left" if side == "left" else "right"].get())
+                self.assertNotIn("下一条", self.app.count_vars["left" if side == "left" else "right"].get())
                 self.app.on_result("success"); self.app._tick_once()
                 self.assertIn("开始录制", button.cget("text"))
                 self.assertIn("0005", button.cget("text"))
-                self.assertIn("下一条", self.app.count_vars[side].get())
+                self.assertIn("下一条", self.app.count_vars["left" if side == "left" else "right"].get())
 
     def test_interrupted_episode_waits_for_manual_result_without_false_recording(self):
-        for side in ("left", "right"):
+        for side in ("left", "right", "right_push"):
             for result in ("success", "failure"):
                 with self.subTest(side=side, result=result):
                     self.prepare_recording(side)
@@ -1177,9 +1388,9 @@ class ConsoleSimulationTest(unittest.TestCase):
                     self.assertIn("已中断，等待保存", self.app.status_var.get())
                     self.assertNotIn("正在录制", self.app.status_var.get())
                     self.assertIn("camera_stream_stale", self.app.message_var.get())
-                    self.assertIn(f"{side}_episode_0004", self.app.message_var.get())
+                    self.assertIn(f"{ui.TASK_GROUPS[side]}_episode_0004", self.app.message_var.get())
                     self.assertIn("中断数据不会标为有效", self.app.message_var.get())
-                    button = getattr(self.app, "start_" + side + "_button")
+                    button = self.app.start_left_button if side == "left" else self.app.start_right_button
                     self.assertIn("本条已中断，等待保存", button.cget("text"))
                     self.assertIn("0004", button.cget("text"))
                     for start in (self.app.start_left_button, self.app.start_right_button):
@@ -1194,6 +1405,20 @@ class ConsoleSimulationTest(unittest.TestCase):
 
 
 class StatusPollingTest(unittest.TestCase):
+    def test_recording_timer_ignores_wall_clock_skew_and_stale_replies(self):
+        control = REAL_SESSION_CONTROL('127.0.0.1', 1)
+        control._value = {'phase': 'recording', 'recording_elapsed_s': .2,
+                          'active_episode': {'recording_started_unix_s': 100}}
+        control._received_monotonic = 10
+        with patch.object(ui.time, 'time', return_value=999999), patch.object(ui.time, 'monotonic', return_value=10.3):
+            value, _, _ = control.snapshot()
+        self.assertAlmostEqual(value['recording_elapsed_s'], .5)
+        with patch.object(ui.time, 'monotonic', return_value=1000):
+            value, _, _ = control.snapshot()
+        self.assertAlmostEqual(value['recording_elapsed_s'], 1.7)
+        control._value.update(phase='starting', recording_elapsed_s=None)
+        self.assertIsNone(control.snapshot()[0]['recording_elapsed_s'])
+
     def test_static_hold_allows_right_alignment_but_requires_release_before_left_alignment(self):
         status = right_master_ready_status()
         status['collection'].update(left_static_hold_phase='held', left_static_hold_confirmed=True)
