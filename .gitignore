@@ -27,28 +27,14 @@ ros2_robot/log/
 *.apk
 
 # Runtime / local outputs
-/outputs/
-/datasets/
-/data/
-/recordings/
-/checkpoints/
+outputs/
+datasets/
 *.log
-
-# Local configuration and credentials
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.p12
-*.pfx
-credentials.json
-secrets.json
-*token*.json
 
 # IDE / OS
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+.env
 ros2_arms/.git.bak_ros2_arms_remote/

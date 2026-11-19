@@ -89,8 +89,8 @@ source install/setup.bash
 ```bash
 openarm-can-configure-socketcan can0 -fd -b 1000000 -d 5000000
 openarm-can-configure-socketcan can1 -fd -b 1000000 -d 5000000
-openarm-can-configure-socketcan can2 -fd -b 1000000 -d 5000000
-openarm-can-configure-socketcan can3 -fd -b 1000000 -d 5000000
+openarm-can-configure-socketcan can2 -fd -b 1000000 -d 1000000
+openarm-can-configure-socketcan can3 -fd -b 1000000 -d 1000000
 ```
 
 
