@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import time
+from .standard_home import StandardHome
 from remote_teleop_protocol.protocol import decode_collection_ack, PacketError, COLLECTION_ACK_STATIC_HOLD_CAPABLE
 
 
@@ -16,7 +17,7 @@ from remote_teleop_protocol.protocol import decode_collection_ack, PacketError, 
 LIMITS = [(-1.396263, 3.490659), (-1.745329+math.pi/2, 1.745329+math.pi/2),
           (-1.570796, 1.570796), (0.0, 2.443461), (-1.570796, 1.570796),
           (-0.785398, 0.785398), (-1.570796, 1.570796), (-1.0472, 0.0)]
-COMMANDS = {"left_lock", "left_follow", "left_align_follow", "left_align_pause",
+COMMANDS = {"left_home", "right_home", "left_home_stop", "right_home_stop", "left_lock", "left_follow", "left_align_follow", "left_align_pause",
             "left_lock_both", "left_hold_release",
             "left_master_align", "left_master_pause", "right_save", "right_return",
             "right_pause", "right_follow", "right_master_align", "right_master_pause", "collection_begin", "collection_end"}
@@ -48,6 +49,7 @@ def distance(a, b):
 
 class CollectionMotion:
     def __init__(self, path):
+        self.standard_home = StandardHome(self)
         self.path = Path(path)
         self.left = self.right = None
         self.returning = False
@@ -158,6 +160,7 @@ class CollectionMotion:
             return 3, None  # Never turn an unknown peer into an idle servo.
 
     def interrupt(self, actual, reason):
+        self.standard_home.fail(reason)
         if self.left_static_phase in {"preparing", "held"}:
             self.left_static_phase = "failed"
             self.note = reason + "；左主臂保持不可确认，需显式解除；从臂继续保持"
@@ -193,6 +196,10 @@ class CollectionMotion:
     def status(self, actual, leader):
         right_ack, left_ack = self._collection_modes()
         return {
+            "standard_home_supported": True,
+            "standard_home": self.standard_home.status(),
+            "independent_log_recording_supported": True,
+            "split_log_tasks_supported": True,
             "left_mode": "HOLD" if self.left is not None else "FOLLOW",
             "left_static_hold_supported": bool(self.collection_ack & COLLECTION_ACK_STATIC_HOLD_CAPABLE),
             "left_static_hold_requested": self.left_static_hold,
@@ -738,6 +745,16 @@ class CollectionMotion:
                 raise ValueError("录制锁不属于本条 episode")
             self.recording = None
             return
+        if name in {"left_home_stop", "right_home_stop"}:
+            if name.startswith(str(self.standard_home.side) + "_"):
+                self.standard_home.stop(now)
+            return
+        if self.standard_home.busy:
+            if name in {self.standard_home.side + "_master_pause",
+                        "left_lock" if self.standard_home.side == "left" else "right_pause"}:
+                self.standard_home.stop(now)
+                return
+            raise ValueError("标准回位或主臂释放尚未结束，请先停止标准回位")
         if name == "right_master_pause" or (name == "right_pause" and self.right_master_align_active):
             if self.returning:
                 self.interrupt(actual, "已点击停止右臂运动")
@@ -797,6 +814,11 @@ class CollectionMotion:
             if name == "collection_begin" and request.get("token") == self.recording["token"]:
                 return
             raise ValueError("正在录制或封装，请先结束本条数据")
+        if name in {"left_home", "right_home"}:
+            side = name.split("_")[0]
+            self.standard_home.start(side, actual, applied, leader, now,
+                                     LEFT_LIMITS if side == "left" else LIMITS)
+            return
         if name == "left_hold_release":
             if self.left_static_phase == "idle":
                 return
@@ -848,12 +870,24 @@ class CollectionMotion:
                 raise ValueError("运动切换未完成，不能录制")
             if side == "left" and self.left is not None:
                 raise ValueError("左臂仍在保持，请先恢复左臂跟随")
-            if side == "right":
+            task = request.get("task")
+            task_sides = {"LEFT_PICK_ONE": "left", "RIGHT_PULL_LOG": "right", "RIGHT_PUSH_LOG": "right"}
+            if task is not None and task_sides.get(task) != side:
+                raise ValueError("录制任务与机械臂不匹配")
+            if side == "right" and task in {"RIGHT_PULL_LOG", "RIGHT_PUSH_LOG"}:
+                # Each manual phase starts at its own operator-confirmed READY.
+                # The opposite arm may follow or hold during a demonstration.
+                # Never force a push-back demonstration to the old picking pose.
+                if self.right is not None:
+                    raise ValueError("菌棒采集需要右臂跟随，请先恢复右臂跟随")
+            elif side == "right":
                 if self.left is None or self.right is not None or self.saved is None:
                     raise ValueError("右臂采集需要左臂保持、已保存起始位、右臂恢复跟随")
                 if distance(actual[8:15], self.saved["actual"][:7]) > 0.07:
                     raise ValueError("右臂尚未到达保存的起始位（允许误差 0.07 rad）")
             self.recording = {"side": side, "token": request["token"]}
+            if task is not None:
+                self.recording["task"] = task
             return
         if name in {"left_lock", "left_lock_both"}:
             if name == "left_lock_both":
@@ -966,6 +1000,7 @@ class CollectionMotion:
                 result[8:16] = self.right
             return result
         result = list(requested)
+        self.standard_home.update(actual, self.leader_now, now)
         self._update_static_hold(now)
         if self.right_master_align_active:
             self._update_right_master(actual, requested, self.leader_now, now)
@@ -983,6 +1018,14 @@ class CollectionMotion:
             if leader_ack == 0:
                 self.phase = "preparing"; self.started = now
                 self.leader_start = pose(self.leader_now[8:16])
+                if any(v < lo-.01 or v > hi+.01 for v, (lo, hi) in zip(self.leader_start, LIMITS)):
+                    self.returning = False; self.phase = "hold"
+                    self.leader_target = None
+                    self.note = "右主臂回位初始反馈超出关节限位；从臂保持"
+                    return list(self.left) + list(self.right)
+                # As in standard home, do not send a slightly negative J4
+                # encoder sample as a target: the master rejects that packet.
+                self.leader_start = tuple(max(lo, min(hi, v)) for v, (lo, hi) in zip(self.leader_start, LIMITS))
                 self.leader_target = self.leader_start
                 self.duration = max(self.duration, 1.875 * max(abs(a-b)/v for a,b,v in zip(
                     self.leader_start, self.saved["leader"], RETURN_SPEED_RAD_S)))

@@ -17,22 +17,31 @@ from remote_teleop_protocol.protocol import (
     COLLECTION_ACK_LEFT_CAPABLE, COLLECTION_ACK_LEFT_SHIFT, COLLECTION_STATE_FLAGS,
     COLLECTION_ACK_STATIC_HOLD_CAPABLE,
 )
+from .left_only_support import LEFT_ACTION_PORT, LEFT_STATE_PORT, PassiveMotorHealth
 from .common import (ACTION_PORT, GRIPPER_MAX_RAD, GRIPPER_OPEN_M,
                      haptic_desired_axes, gripper_contact_reference,
                      LEADER_JOINT_STATES_TOPIC, LEADER_LEFT_COMMAND_TOPIC,
                      LEADER_LEFT_FORCE_FEEDBACK_TOPIC, LEADER_RIGHT_COMMAND_TOPIC,
                      LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, STATE_PORT)
 
+STATE_DRAIN_PACKETS = 8
+STATE_DRAIN_BUDGET_NS = 1_000_000
+
 
 class LeaderGateway(Node):
-    def __init__(self, peer: str, rate: float, enable_left: bool):
+    def __init__(self, peer: str, rate: float, enable_left: bool, *, left_only=False, health_bus=None):
         super().__init__("remote_teleop_leader")
         self.peer = peer
         self.period = 1.0 / rate
         self.session = secrets.randbits(64) or 1
         self.sequence = 0
         self.axes = [0.0] * 16
+        if left_only and (not enable_left or not health_bus):
+            raise ValueError("left-only requires left feedback and a health CAN bus")
         self.enable_left = enable_left
+        self.left_only = left_only
+        self.motor_health = PassiveMotorHealth(health_bus) if left_only else None
+        self.action_port = LEFT_ACTION_PORT if left_only else ACTION_PORT
         self.have_right = False
         self.have_left = False
         self.right_rx = self.left_rx = 0.0
@@ -52,16 +61,16 @@ class LeaderGateway(Node):
         self.left_static_failed = False
         self.lock = threading.Lock()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("0.0.0.0", STATE_PORT))
+        self.sock.bind(("0.0.0.0", LEFT_STATE_PORT if left_only else STATE_PORT))
         self.sock.setblocking(False)
         self.create_subscription(JointState, LEADER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
-        self.right_force_pub = self.create_publisher(JointState, LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, 1)
-        self.return_pub = self.create_publisher(JointState, "/leader/right_arm/collection_return", 1)
+        self.right_force_pub = None if left_only else self.create_publisher(JointState, LEADER_RIGHT_FORCE_FEEDBACK_TOPIC, 1)
+        self.return_pub = None if left_only else self.create_publisher(JointState, "/leader/right_arm/collection_return", 1)
         self.left_return_pub = (self.create_publisher(
             JointState, "/leader/left_arm/collection_return", 1) if enable_left else None)
         self.left_force_pub = (self.create_publisher(JointState, LEADER_LEFT_FORCE_FEEDBACK_TOPIC, 1)
                                if enable_left else None)
-        self.right_position_feedback_pub = self.create_publisher(
+        self.right_position_feedback_pub = None if left_only else self.create_publisher(
             JointState, LEADER_RIGHT_COMMAND_TOPIC, 1)
         self.left_position_feedback_pub = (self.create_publisher(
             JointState, LEADER_LEFT_COMMAND_TOPIC, 1) if enable_left else None)
@@ -73,9 +82,9 @@ class LeaderGateway(Node):
         self.create_timer(self.period, self.tick)
         self.sent = self.received = self.invalid = 0
         self.last_log = time.monotonic()
-        arms = "right + left" if enable_left else "right only"
+        arms = "left only" if left_only else ("right + left" if enable_left else "right only")
         self.get_logger().info(
-            f"{arms} leader session={self.session} -> {peer}:{ACTION_PORT} at {rate:.0f} Hz; "
+            f"{arms} leader session={self.session} -> {peer}:{self.action_port} at {rate:.0f} Hz; "
             "bounded haptic stream available")
 
     def publish_force_feedback(self, state: FollowerState):
@@ -129,7 +138,8 @@ class LeaderGateway(Node):
         # Private haptic topic: one position value is the follower gripper's
         # actual motor angle. It is NOT an eight-axis joint_command message.
         right.position = gripper_contact_reference(state, 'right')
-        self.right_force_pub.publish(right)
+        if not getattr(self, "left_only", False):
+            self.right_force_pub.publish(right)
         if self.enable_left:
             left = JointState(); left.effort = left_efforts
             left.position = gripper_contact_reference(state, 'left')
@@ -139,7 +149,7 @@ class LeaderGateway(Node):
         values = dict(zip(msg.name, msg.position))
         with self.lock:
             for side, offset in (("right", 8), ("left", 0)):
-                if side == "left" and not self.enable_left:
+                if (side == "right" and getattr(self, "left_only", False)) or (side == "left" and not self.enable_left):
                     continue
                 names = [f"openarm_{side}_joint{i}" for i in range(1, 8)]
                 names.append(f"openarm_{side}_finger_joint1")
@@ -167,6 +177,8 @@ class LeaderGateway(Node):
                         f"openarm_{side}_collection_mode" in values and mode is None)
 
     def collection_acknowledgement(self):
+        if getattr(self, "left_only", False):
+            return 0  # Collection/return workflows are unavailable in the isolated mode.
         ack = self.collection_ack
         if self.enable_left and self.left_collection_ack is not None:
             ack |= COLLECTION_ACK_LEFT_CAPABLE | (self.left_collection_ack << COLLECTION_ACK_LEFT_SHIFT)
@@ -177,6 +189,8 @@ class LeaderGateway(Node):
         # An explicit peer packet is required to release a latched servo. A
         # missing packet instead leaves the local 100 ms controller watchdog
         # holding the measured pose; it never resumes a stored trajectory.
+        if getattr(self, "left_only", False):
+            return
         flags = state.collection_flags
         if flags not in COLLECTION_STATE_FLAGS:
             return  # includes simultaneous left/right servo requests
@@ -259,11 +273,13 @@ class LeaderGateway(Node):
             self.left_return_requested = False
 
     def tick(self):
+        if getattr(self, "motor_health", None) is not None and not self.motor_health.healthy():
+            return  # Stop fresh actions; follower watchdog latches a network fault.
         with self.lock:
-            if not self.have_right or (self.enable_left and not self.have_left):
+            if (not getattr(self, "left_only", False) and not self.have_right) or (self.enable_left and not self.have_left):
                 return
             axes = tuple(self.axes)
-            if (time.monotonic()-self.right_rx > 0.10 or
+            if ((not getattr(self, "left_only", False) and time.monotonic()-self.right_rx > 0.10) or
                 (self.enable_left and time.monotonic()-self.left_rx > 0.10)):
                 return  # don't turn stale physical feedback into fresh actions
             collection_ack = self.collection_acknowledgement()
@@ -271,13 +287,16 @@ class LeaderGateway(Node):
         now_ns = time.monotonic_ns()
         msg = ActionCommand(self.session, self.sequence, now_ns, axes, 100_000_000,
                             collection_ack)
-        self.sock.sendto(encode_action(msg), (self.peer, ACTION_PORT))
+        self.sock.sendto(encode_action(msg), (self.peer, getattr(self, "action_port", ACTION_PORT)))
         self.action_history[self.sequence] = axes
         if len(self.action_history) > 256:
             del self.action_history[min(self.action_history)]
         self.sent += 1
-        try:
-            while True:
+        receive_started_ns = time.monotonic_ns()
+        for _ in range(STATE_DRAIN_PACKETS):
+            if time.monotonic_ns() - receive_started_ns >= STATE_DRAIN_BUDGET_NS:
+                break
+            try:
                 data, peer = self.sock.recvfrom(2048)
                 if peer[0] != self.peer:
                     continue
@@ -298,10 +317,10 @@ class LeaderGateway(Node):
                     self.received += 1
                     self.publish_return(state)
                     self.publish_force_feedback(state)
-        except BlockingIOError:
-            pass
-        except PacketError:
-            self.invalid += 1
+            except BlockingIOError:
+                break
+            except PacketError:
+                self.invalid += 1
         if time.monotonic() - self.last_log >= 2.0:
             self.get_logger().info(
                 f"session={self.session} sent={self.sent} state_rx={self.received} invalid={self.invalid}")
@@ -314,14 +333,20 @@ def main():
     parser.add_argument("--rate", type=float, default=100.0)
     parser.add_argument("--enable-left", action="store_true",
                         help="send left-arm axes as well as the default right arm")
+    parser.add_argument("--left-only", action="store_true")
+    parser.add_argument("--health-bus")
     args, ros_args = parser.parse_known_args()
+    if args.left_only and not args.health_bus:
+        parser.error("--left-only requires --health-bus")
     rclpy.init(args=ros_args)
-    node = LeaderGateway(args.peer, args.rate, args.enable_left)
+    node = LeaderGateway(args.peer, args.rate, args.enable_left or args.left_only,
+                         left_only=args.left_only, health_bus=args.health_bus)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        if node.motor_health is not None: node.motor_health.close()
         node.sock.close()
         node.destroy_node()
         if rclpy.ok(): rclpy.shutdown()

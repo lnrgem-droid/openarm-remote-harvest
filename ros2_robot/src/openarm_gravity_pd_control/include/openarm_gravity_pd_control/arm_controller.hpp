@@ -85,6 +85,7 @@ struct ArmControlParams {
   /// Explicit opt-in startup homing. This reproduces OpenArm's upstream
   /// AdjustPosition pose; it never writes motor zero offsets.
   bool startup_home = false;
+  bool startup_hold_current = false;
   double startup_home_duration_s = 2.0;
   double startup_home_timeout_s = 15.0;
   double startup_home_tolerance_rad = 0.03;

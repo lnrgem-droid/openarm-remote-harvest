@@ -144,5 +144,119 @@ class WiringProfileTest(unittest.TestCase):
                 self.assertEqual(args[args.index("--jetson-ssh") + 1], variables["JETSON_HOST"])
 
 
+class StartupFailureMessageTest(unittest.TestCase):
+    def test_alignment_failure_reports_current_attempt_not_old_fault(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'teleop.log'
+            path.write_text('ERROR: old fault\n')
+            cursor = start.startup_log_cursor({'StandardOutput': 'append:' + str(path)})
+            with path.open('a') as stream:
+                stream.write('  自动对齐验收：未通过，不允许开始遥操\n'
+                             '  - 控制状态必须为 RUNNING 且无故障\n')
+            message = start.startup_exit_reason(cursor)
+            self.assertIn('启动验收失败', message)
+            self.assertIn('RUNNING', message)
+            self.assertNotIn('old fault', message)
+            with path.open('a') as stream:
+                stream.write('ERROR: 启动验收失败：控制故障：主臂指令接收超时\n')
+            self.assertIn('主臂指令接收超时', start.startup_exit_reason(cursor))
+
+    def test_systemd_append_mode_resolves_effective_unit_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "teleop.log"
+            path.write_text("ERROR: old failure\n")
+            reply = subprocess.CompletedProcess([], 0, stdout=(
+                "# main unit\n[Service]\nStandardOutput=append:/wrong.log\n"
+                "# drop-in\n[Service]\nStandardOutput=append:" + str(path) + "\n"))
+            with patch.object(start.subprocess, "run", return_value=reply) as run:
+                cursor = start.startup_log_cursor({"StandardOutput": "append"}, "teleop.service")
+            self.assertEqual(run.call_args.args[0],
+                             ["systemctl", "--user", "cat", "teleop.service"])
+            with path.open("a") as stream:
+                stream.write("ERROR: 从臂未实际到达初始位\n"
+                    "[follower_gravity_pd.can1]: Startup homing timed out: J4 target=0.6283 actual=0.1913 error=0.4370 rad, feedback_enabled_fresh=0\n")
+            message = start.startup_exit_reason(cursor)
+            self.assertNotIn("36.0°", message)
+            self.assertNotIn("11.0°", message)
+            self.assertIn("日志角度不能作为已核验的实测位置", message)
+            self.assertIn("电机使能或反馈未通过核验", message)
+            self.assertNotIn("old failure", message)
+
+    def test_unavailable_effective_unit_does_not_guess_log_path(self):
+        with patch.object(start.subprocess, "run", side_effect=subprocess.TimeoutExpired("systemctl", 5)):
+            self.assertIsNone(start.startup_log_cursor({"StandardOutput": "append"}, "teleop.service"))
+        for output in ("journal", "append:/tmp/%n.log", "append:/tmp/escaped\\x20.log"):
+            reply = subprocess.CompletedProcess([], 0, stdout="[Service]\nStandardOutput=" + output)
+            with self.subTest(output=output), patch.object(start.subprocess, "run", return_value=reply):
+                self.assertIsNone(start.startup_log_cursor({"StandardOutput": "append"}, "teleop.service"))
+
+    def test_only_this_attempt_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "teleop.log"
+            path.write_text("ERROR: old unrelated failure\n")
+            cursor = start.startup_log_cursor({"StandardOutput": "append:" + str(path)})
+            self.assertNotIn("old unrelated", start.startup_exit_reason(cursor))
+            with path.open("a") as stream:
+                stream.write("ERROR: 从臂未实际到达初始位\n"
+                    "[follower_gravity_pd.can1]: Startup homing timed out: J1 target=0.0000 actual=0.4568 error=0.4568 rad\n"
+                    "[follower_gravity_pd.can2]: Startup homing timed out: J1 target=0.0000 actual=-0.8394 error=0.8394 rad\n")
+            message = start.startup_exit_reason(cursor)
+            self.assertIn("从臂归位超时", message)
+            self.assertIn("26.2°", message)
+            self.assertIn("-48.1°", message)
+            self.assertIn("主臂尚未启动", message)
+            self.assertNotIn("被替换", message)
+
+    def test_leader_missing_feedback_explains_power_and_recovery_without_cached_angles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'teleop.log'
+            path.write_text('ERROR: 从臂未实际到达初始位\n')
+            cursor = start.startup_log_cursor({'StandardOutput': 'append:' + str(path)})
+            with path.open('a') as stream:
+                stream.write('ERROR: 主臂未实际到达初始位，停止自动启动\n'
+                    '[leader_gravity_pd.can0]: Startup homing timed out: J4 target=0.6283 actual=0.0000 feedback_enabled_fresh=0\n'
+                    '[leader_gravity_pd.can1]: Startup homing timed out: J4 target=0.6283 actual=0.0000 feedback_enabled_fresh=0\n')
+            message = start.startup_exit_reason(cursor)
+            self.assertIn('右主臂（笔记本 can0）', message)
+            self.assertIn('左主臂（笔记本 can1）', message)
+            self.assertIn('USB 盒亮灯不代表电机已通电', message)
+            self.assertIn('停止遥操并失能', message)
+            self.assertIn('从臂可能仍使能', message)
+            self.assertNotIn('36.0°', message)
+            self.assertNotIn('从臂归位超时', message)
+
+    def test_leader_verified_feedback_timeout_does_not_claim_power_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'teleop.log'
+            cursor = start.startup_log_cursor({'StandardOutput': 'append:' + str(path)})
+            path.write_text('ERROR: 主臂未实际到达初始位\n'
+                '[leader_gravity_pd.can0]: Startup homing timed out: J4 target=0.6283 actual=0.5000 feedback_enabled_fresh=1\n')
+            message = start.startup_exit_reason(cursor)
+            self.assertIn('机械阻挡', message)
+            self.assertNotIn('电机使能或反馈未通过核验', message)
+
+    def test_missing_rotated_or_truncated_log_uses_generic_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "teleop.log"
+            path.write_text("old log data\n" * 100)
+            cursor = start.startup_log_cursor({"StandardOutput": "append:" + str(path)})
+            path.write_text("ERROR: stale\n")
+            self.assertNotIn("stale", start.startup_exit_reason(cursor))
+            path.rename(path.with_suffix(".old"))
+            path.write_text("ERROR: foreign log\n")
+            self.assertNotIn("foreign", start.startup_exit_reason(cursor))
+            path.unlink()
+            self.assertIn("启动服务已退出", start.startup_exit_reason(cursor))
+
+    def test_new_log_and_other_startup_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "teleop.log"
+            cursor = start.startup_log_cursor({"StandardOutput": "append:" + str(path)})
+            path.write_text("ERROR: 控制器缺少动态库\n")
+            self.assertEqual(start.startup_exit_reason(cursor), "ERROR: 控制器缺少动态库")
+        self.assertIsNone(start.startup_log_cursor({"StandardOutput": "journal"}))
+        self.assertIn("启动服务已退出", start.startup_exit_reason(None))
+
+
 if __name__ == "__main__":
     unittest.main()

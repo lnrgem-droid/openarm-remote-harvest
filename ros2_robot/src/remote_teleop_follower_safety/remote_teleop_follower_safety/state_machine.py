@@ -128,6 +128,12 @@ class SafetyStateMachine:
 
     def request_hold(self) -> None:
         """Leave RUNNING without clearing the verified alignment."""
+        # A cleanup HOLD can race with loss of drive feedback during an
+        # intentional disable. A latched FAULT/E_STOP already prohibits RUN;
+        # preserve it exactly instead of adding INVALID_COMMAND. This does not
+        # acknowledge healthy holding, clear a fault, or permit a restart.
+        if self._state in (ControlState.FAULT, ControlState.E_STOP):
+            return
         if self._state not in (ControlState.ALIGNING, ControlState.RUNNING, ControlState.READY):
             raise TransitionError("HOLD is valid only from ALIGNING, READY or RUNNING")
         if self._state is not ControlState.ALIGNING:

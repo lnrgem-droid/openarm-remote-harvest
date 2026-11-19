@@ -100,6 +100,20 @@ def test_return_rechecks_leader_distance_after_reset_handshake(tmp_path):
     assert m.duration == pytest.approx(1.875 * .8 / .20)
 
 
+@pytest.mark.parametrize('residual,starts', [(-.0001907377737087046, True), (-.02, False)])
+def test_saved_return_from_zero_respects_exact_servo_limit(tmp_path, residual, starts):
+    m = CollectionMotion(tmp_path/'pose.json')
+    execute(m, 'right_save'); execute(m, 'left_lock')
+    master = list(Q); master[11] = residual
+    execute(m, 'right_return', leader=master)
+    m.update(Q, master, 1.01, True, master, 0)
+    assert m.returning is starts
+    if starts:
+        assert m.leader_target[3] == 0.
+    else:
+        assert m.leader_target is None and m.right is not None
+
+
 @pytest.mark.parametrize('residual,expected_phase',[(.119,'hold'),(.0524,'idle')])
 def test_return_static_residual_blocks_then_corrected_residual_releases(tmp_path, residual, expected_phase):
     m = CollectionMotion(tmp_path / 'pose.json')

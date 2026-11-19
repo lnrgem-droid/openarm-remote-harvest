@@ -86,7 +86,10 @@ def test_runtime_dependencies_checked_before_any_homing():
     script=(ROOT/'scripts/run_bimanual_remote_feedback.sh').read_text()
     check=script[script.index('verify_runtime_builds() {'):script.index('\ncleanup() {')]
     assert 'ldd "$HOST_CONTROL_NODE"' in check
-    assert "ldd '$JETSON_CONTROL_NODE'" in check
+    remote_check = (ROOT / "scripts/check_remote_startup_build.sh").read_text()
+    assert 'ssh "$JETSON_HOST" "$remote_check_command" <"$ROOT_DIR/scripts/check_remote_startup_build.sh"' in check
+    assert 'ldd "$node"' in remote_check
+    assert "grep -q 'not found'" in remote_check
     assert "grep -q 'not found'" in check
     main=script[script.index("echo '============================================================'"):]
     assert main.index('verify_runtime_builds') < main.index('show_stage 1')

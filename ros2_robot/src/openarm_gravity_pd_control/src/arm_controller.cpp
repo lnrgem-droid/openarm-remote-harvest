@@ -211,6 +211,12 @@ bool ArmController::init(const std::function<bool()> & keep_running)
     // distributed handshake; the launcher explicitly releases this hold only
     // after RUNNING is confirmed.
     startup_hold_active_.store(true);
+  } else if (params_.startup_hold_current) {
+    // Hold the encoder pose measured at enable through the distributed
+    // ALIGN/RUN handshake. Never substitute the fixed home or change zeros.
+    params_.startup_home_target = target_positions_;
+    startup_hold_active_.store(true);
+    RCLCPP_WARN(logger_, "Startup measured-pose hold ready; fixed homing skipped.");
   }
 
   std::cout << "[ArmController][" << can_interface_ << "] Ready." << std::endl;

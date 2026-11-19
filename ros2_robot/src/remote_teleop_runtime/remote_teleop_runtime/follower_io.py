@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import json
 import select
 import socket
+import sys
 import threading
 import time
 
@@ -80,12 +81,17 @@ class FollowerIOWorker:
         self.pending_action_epoch = None
         self.last_step_ns = 0
         self.last_processed_ns = 0
+        self.last_wire_action = None
         self.diagnostics = dict(rx_packets=0, rx_invalid=0, rx_rejected=0, rx_discarded=0,
             rx_resyncs=0, rx_budget_yields=0, heartbeat_timeouts=0, heartbeat_unmatched=0,
             max_worker_gap_ns=0, max_packet_processing_gap_ns=0, max_valid_action_gap_ns=0,
             max_control_tick_gap_ns=0, max_control_duration_ns=0, worker_error=None,
             kernel_timestamps=bool(self.kernel_clock), rx_kernel_timestamp_rejected=0,
-            rx_kernel_stale=0, rx_kernel_committed=0)
+            rx_kernel_stale=0, rx_kernel_committed=0,
+            python_switch_interval_s=sys.getswitchinterval(),
+            max_queue_delay_ns=0, max_accepted_sender_gap_ns=0,
+            max_accepted_arrival_gap_ns=0, accepted_sequence_gaps=0,
+            last_slow_receive=None)
 
     def start(self):
         self.thread.start()
@@ -211,6 +217,14 @@ class FollowerIOWorker:
                     self.diagnostics["max_packet_processing_gap_ns"], processed-self.last_processed_ns)
             self.last_processed_ns = processed
             stamp = self.kernel_clock.timestamp(ancillary, flags)
+            if stamp is not None and 0 <= stamp <= self.clock():
+                queue_delay = self.clock()-stamp
+                self.diagnostics['max_queue_delay_ns'] = max(
+                    self.diagnostics['max_queue_delay_ns'], queue_delay)
+                if queue_delay >= 50_000_000:
+                    self.diagnostics['last_slow_receive'] = dict(
+                        processed_ns=processed, kernel_arrival_ns=stamp,
+                        queue_delay_ns=queue_delay)
             if stamp is None:
                 self.diagnostics["rx_kernel_timestamp_rejected"] += 1
             elif stamp < self.kernel_min_rx_ns or not 0 <= self.clock()-stamp <= ACTION_FRESH_NS:
@@ -219,6 +233,18 @@ class FollowerIOWorker:
                 try:
                     action = decode_message(data)
                     if isinstance(action, ActionCommand) and self.tracker.accept(action.session_id, action.sequence):
+                        previous = self.last_wire_action
+                        if previous is not None and previous[0] == action.session_id:
+                            # Differences are within each clock domain. Never
+                            # subtract the leader's clock from the follower's.
+                            self.diagnostics['max_accepted_sender_gap_ns'] = max(
+                                self.diagnostics['max_accepted_sender_gap_ns'],
+                                action.sender_monotonic_ns-previous[2])
+                            self.diagnostics['max_accepted_arrival_gap_ns'] = max(
+                                self.diagnostics['max_accepted_arrival_gap_ns'], stamp-previous[3])
+                            self.diagnostics['accepted_sequence_gaps'] += max(0, action.sequence-previous[1]-1)
+                        self.last_wire_action = (action.session_id, action.sequence,
+                                                 action.sender_monotonic_ns, stamp)
                         candidate = ReceivedAction(action, stamp, processed, peer[0])
                     else:
                         self.diagnostics["rx_rejected"] += 1
@@ -358,6 +384,7 @@ class FollowerIOWorker:
                 self.action = None
         if reset:
             self.tracker.reset()
+            self.last_wire_action = None
             self.empty_boundary_ns = None
             self.resync = True
         self._receive_actions()

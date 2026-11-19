@@ -110,6 +110,7 @@ public:
     declare_parameter("control_rate",     500.0);
     declare_parameter("command_interp_s", 0.02);
     declare_parameter("startup_home", false);
+    declare_parameter("startup_hold_current", false);
     declare_parameter("startup_home_duration_s", 2.0);
     declare_parameter("startup_home_timeout_s", 15.0);
     declare_parameter("startup_home_tolerance_rad", 0.03);
@@ -150,6 +151,10 @@ public:
     const double control_rate = get_parameter("control_rate").as_double();
     const double command_interp_s = get_parameter("command_interp_s").as_double();
     const bool startup_home = get_parameter("startup_home").as_bool();
+    const bool startup_hold_current = get_parameter("startup_hold_current").as_bool();
+    if (startup_home && startup_hold_current) {
+      throw std::invalid_argument("startup_home and startup_hold_current are mutually exclusive");
+    }
     const double startup_home_duration_s =
       get_parameter("startup_home_duration_s").as_double();
     const double startup_home_timeout_s =
@@ -214,6 +219,7 @@ public:
     params.control_dt      = 1.0 / control_rate;
     params.command_interp_s = command_interp_s;
     params.startup_home = startup_home;
+    params.startup_hold_current = startup_hold_current;
     params.startup_home_duration_s = startup_home_duration_s;
     params.startup_home_timeout_s = startup_home_timeout_s;
     params.startup_home_tolerance_rad = startup_home_tolerance_rad;

@@ -46,11 +46,18 @@ def vector(s, key):
     return values
 
 
-def assess(s, phase, p):
+def assess(s, phase, p, arms=("left", "right"), measured_start=False):
     issues, rows, positions = [], [], []
+    if measured_start and arms != ('left',):
+        raise ValueError('measured startup is supported only for isolated left mode')
     expected = 'ALIGNING' if phase == 'aligning' else 'RUNNING'
     if s.get('state') != expected or s.get('fault_bits') != 0:
         issues.append('控制状态必须为 ' + expected + ' 且无故障')
+        if s.get('state') in ('FAULT', 'E_STOP') or s.get('fault_bits'):
+            reason = str(s.get('reason') or '未提供故障原因').replace('\n', ' ')[:240]
+            if reason == 'leader action receive timeout':
+                reason = '主臂指令接收超时（leader action receive timeout）'
+            issues.insert(0, '控制故障：' + reason)
     if s.get('feedback_fresh_for_control') is not True:
         issues.append('从臂反馈不新鲜')
     for key in ('action_age_ms', 'feedback_age_ms'):
@@ -59,18 +66,20 @@ def assess(s, phase, p):
             issues.append(key + ' 缺失或过期')
     if not isinstance(s.get('leader_session_id'), int) or s['leader_session_id'] <= 0:
         issues.append('主臂会话无效')
-    if set(s.get('enabled_arms', [])) != {'left', 'right'}:
-        issues.append('必须同时具有左右臂反馈')
+    if set(s.get('enabled_arms', [])) != set(arms):
+        issues.append('活动机械臂与要求不一致：' + ','.join(arms))
+    if arms == ('left',) and (s.get('mode') != 'left_only' or (s.get('motor_health') or {}).get('healthy') is not True):
+        issues.append('单左臂模式或左臂电机健康证据无效')
     if phase == 'following':
         c = s.get('collection') or {}
         if s.get('relative_follow_reference_captured') is not True:
             issues.append('跟随参考未建立')
-        if c.get('left_mode') != 'FOLLOW' or c.get('right_mode') != 'FOLLOW':
-            issues.append('左右臂未同时处于 FOLLOW')
+        if any(c.get(side + '_mode') != 'FOLLOW' for side in arms):
+            issues.append('要求的机械臂未全部处于 FOLLOW')
         if c.get('recording') is not None or c.get('transitioning_arms') or c.get('return_phase') != 'idle':
             issues.append('存在录制/姿态过渡任务')
     try:
-        for side in ('left', 'right'):
+        for side in arms:
             leader = vector(s, 'leader_' + side + '_rad')
             actual = vector(s, side + '_actual_rad')
             target = vector(s, side + '_target_rad') if phase == 'following' else None
@@ -82,11 +91,11 @@ def assess(s, phase, p):
                        'pair_error_rad': error, 'tolerance_rad': tolerance}
                 if abs(error) > tolerance:
                     issues.append(f'{name} 主从差 {math.degrees(error):+.2f}°，允许 ±{math.degrees(tolerance):.2f}°')
-                if phase == 'aligning':
+                if phase == 'aligning' and not measured_start:
                     for role, value in (('主臂', a), ('从臂', b)):
                         if abs(value - p['home_rad'][j]) > p['home_tolerance_rad']:
                             issues.append(f'{name} {role}未到初始位')
-                else:
+                elif phase == 'following':
                     row.update(target_rad=target[j], tracking_error_rad=target[j] - b)
                     if abs(target[j] - a) > p['target_tolerance_rad']:
                         issues.append(f'{name} 下发目标未与主臂一一对应')
@@ -119,16 +128,16 @@ class StableWindow:
                    for axis in zip(*(values for _, values in self.samples)))
 
 
-def status_request():
+def status_request(left_only=False):
     with tempfile.TemporaryDirectory(prefix='oa_align_') as tmp:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
             client.bind(tmp + '/reply')
             client.settimeout(.5)
-            client.sendto(b'{"command":"status"}', '/tmp/openarm_remote_runtime.sock')
+            client.sendto(b'{"command":"status"}', '/tmp/openarm_left_runtime.sock' if left_only else '/tmp/openarm_remote_runtime.sock')
             return json.loads(client.recv(65536))
 
 
-def verify(read_status, phase, p, clock=time.monotonic, sleep=time.sleep):
+def verify(read_status, phase, p, clock=time.monotonic, sleep=time.sleep, arms=("left", "right"), measured_start=False):
     window = StableWindow(p)
     deadline = clock() + p['timeout_s']
     session = None
@@ -137,7 +146,7 @@ def verify(read_status, phase, p, clock=time.monotonic, sleep=time.sleep):
     while clock() < deadline:
         try:
             s = read_status()
-            last = assess(s, phase, p)
+            last = assess(s, phase, p, arms, measured_start)
             # Never continue acceptance across a restart or latched fault.
             if s.get('state') in ('FAULT', 'E_STOP') or s.get('fault_bits', 0):
                 return dict(last, ok=False, accepted=False, phase=phase, samples=samples)
@@ -165,13 +174,20 @@ def main():
     parser.add_argument('--policy', default=str(Path(__file__).with_name('startup_alignment_policy.json')))
     parser.add_argument('--policy-json')
     parser.add_argument('--report')
+    parser.add_argument('--left-only', action='store_true')
+    parser.add_argument('--measured-start', action='store_true',
+                        help='single-left startup at measured pose; retain all pair/freshness/stability checks')
     args = parser.parse_args()
     try:
+        if args.measured_start and not args.left_only:
+            raise ValueError('--measured-start requires --left-only')
         p = validate_policy(json.loads(args.policy_json or Path(args.policy).read_text()))
         if args.jetson:
             if args.jetson.startswith('-'):
                 raise ValueError('invalid SSH destination')
             command = '/usr/bin/python3 - --phase ' + args.phase + ' --policy-json ' + shlex.quote(json.dumps(p))
+            if args.left_only: command += ' --left-only'
+            if args.measured_start: command += ' --measured-start'
             remote = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
                                      args.jetson, command], text=True,
                                     input=Path(__file__).read_text(), capture_output=True,
@@ -180,7 +196,9 @@ def main():
             if remote.returncode != 0:
                 result['accepted'] = False
         else:
-            result = verify(status_request, args.phase, p)
+            result = verify(lambda: status_request(args.left_only), args.phase, p,
+                            arms=("left",) if args.left_only else ("left", "right"),
+                            measured_start=args.measured_start)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.TimeoutExpired) as exc:
         result = {'accepted': False, 'issues': [str(exc)], 'phase': args.phase}
     result.pop('positions', None)
@@ -190,6 +208,8 @@ def main():
         print('  自动对齐验收：' + ('通过' if result.get('accepted') else '未通过，不允许开始遥操'))
         for issue in result.get('issues', []):
             print('  - ' + issue)
+        if not result.get('accepted'):
+            print('ERROR: 启动验收失败：' + '；'.join(result.get('issues', [])[:3]))
     else:
         print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get('accepted') is True else 1

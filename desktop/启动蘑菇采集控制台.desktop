@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=启动蘑菇采集控制台
+Comment=打开采集界面；点击开始主从遥操后才使能、归位和对齐
+Exec=/home/openarm/dev/openarm-remote-harvest/scripts/open_mushroom_collection_terminal.sh
+Terminal=false
+Categories=Utility;

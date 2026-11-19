@@ -80,6 +80,15 @@ def test_normal_gain_droop_after_startup_hold_is_rejected():
     assert not run_trace(lambda t: s, 'following')['accepted']
 
 
+def test_fault_reason_survives_alignment_verification():
+    s = status('following')
+    s.update(state='FAULT', fault_bits=1, reason='leader action receive timeout')
+    result = run_trace(lambda t: s, 'following')
+    assert result['accepted'] is False
+    assert result['samples'] == 0
+    assert '主臂指令接收超时' in result['issues'][0]
+
+
 def test_clipped_or_offset_target_cannot_hide_mismatch():
     s = status('following'); s['right_target_rad'][6] = .02
     result = run_trace(lambda t: s, 'following')

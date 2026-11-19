@@ -154,12 +154,47 @@ ensure_jetson_rgbd_services() {
     ssh "$JETSON_HOST" 'bash /home/openarm/openarm_robot/prepare-host-capture-services.sh'
     return
   fi
-  ssh "$JETSON_HOST" 'set -e
+  ssh "$JETSON_HOST" 'set -Ee
 runtime=/home/nvidia/openarm-rgbd-runtime
 root=/home/nvidia/dev/openarm-rgbd-preview
 mkdir -p "$runtime"
-alive() { test -f "$1" && kill -0 "$(cat "$1")" 2>/dev/null; }
-camera_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_orbbec_rgbd_service.py" | head -n1 || true)
+stage="准备采集服务"
+startup_error() {
+  echo "ERROR: Jetson $stage 失败（远端脚本第 ${BASH_LINENO[0]} 行）。" >&2
+  for log in camera-service record-manager record-bridge; do
+    echo "--- $runtime/$log.log ---" >&2
+    tail -12 "$runtime/$log.log" >&2 || true
+  done
+}
+trap startup_error ERR
+# Serialize double-clicks. Background services must not inherit this lock.
+exec 9>"$runtime/startup.lock"
+if ! flock -w 15 9; then
+  echo "ERROR: 另一窗口正在准备采集服务，请等待其完成后重试。" >&2
+  exit 1
+fi
+# PID files survive reboot, and their numbers can be reused by unrelated
+# processes or even desktop threads. Verify the executable and service too.
+alive() {
+  local pid expected cmd
+  test -f "$1" || return 1
+  read -r pid <"$1" || return 1
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  case "$1" in
+    "$runtime/camera-service.pid") expected=jetson_orbbec_rgbd_service.py ;;
+    "$runtime/record-manager.pid") expected=jetson_record_manager.py ;;
+    *) return 1 ;;
+  esac
+  test -r "/proc/$pid/cmdline" || return 1
+  cmd=$(tr "\000" " " <"/proc/$pid/cmdline") || return 1
+  case "$cmd" in
+    "/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/$expected "*)
+      kill -0 "$pid" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+stage="启动相机服务"
+camera_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_orbbec_rgbd_service[.]py( |$)" | head -n1 || true)
 if test -n "$camera_pid" && ! test -S /tmp/openarm_rgbd_raw.ipc; then
   echo "相机进程存在但本地采集 IPC 丢失，正在自动重启修复…"
   kill -TERM "$camera_pid" 2>/dev/null || true
@@ -167,6 +202,12 @@ if test -n "$camera_pid" && ! test -S /tmp/openarm_rgbd_raw.ipc; then
     kill -0 "$camera_pid" 2>/dev/null || break
     sleep 0.25
   done
+  if kill -0 "$camera_pid" 2>/dev/null; then
+    echo "ERROR: 旧相机服务未退出，拒绝启动第二个相机进程。" >&2
+    exit 1
+  fi
+  # Allow Orbbec pipelines to release USB resources before reopening them.
+  sleep 12
   camera_pid=""
   rm -f "$runtime/camera-service.pid"
 fi
@@ -174,18 +215,20 @@ if test -n "$camera_pid"; then
   echo "$camera_pid" >"$runtime/camera-service.pid"
 elif ! alive "$runtime/camera-service.pid"; then
   echo "启动 Jetson 三相机服务…"
-  nohup bash "$root/scripts/start_jetson_rgbd_service.sh" >"$runtime/camera-service.log" 2>&1 & echo $! >"$runtime/camera-service.pid"
+  nohup bash "$root/scripts/start_jetson_rgbd_service.sh" >"$runtime/camera-service.log" 2>&1 < /dev/null 9>&- & echo $! >"$runtime/camera-service.pid"
 fi
-manager_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_record_manager.py" | head -n1 || true)
+stage="启动录制管理服务"
+manager_pid=$(pgrep -f "^/home/nvidia/miniconda3/envs/lerobot/bin/python $root/scripts/jetson_record_manager[.]py( |$)" | head -n1 || true)
 if test -n "$manager_pid"; then
   echo "$manager_pid" >"$runtime/record-manager.pid"
 elif ! alive "$runtime/record-manager.pid"; then
   echo "启动 Jetson 录制管理服务…"
-  nohup bash "$root/scripts/start_jetson_record_manager.sh" >"$runtime/record-manager.log" 2>&1 & echo $! >"$runtime/record-manager.pid"
+  nohup bash "$root/scripts/start_jetson_record_manager.sh" >"$runtime/record-manager.log" 2>&1 < /dev/null 9>&- & echo $! >"$runtime/record-manager.pid"
 fi
 # LeRobot state/action recording requires the read-only follower bridge on
 # Jetson localhost.  Merely renicing an already-running bridge (the old
 # behavior below) leaves every episode unable to start after a Jetson reboot.
+stage="准备只读状态桥"
 if ! ss -ltn sport = :9000 | grep -q LISTEN; then
   # Keep the first character in brackets so pgrep cannot match this very
   # shell command (its command line contains the search expression).  The
@@ -197,7 +240,7 @@ if ! ss -ltn sport = :9000 | grep -q LISTEN; then
     exit 1
   fi
   echo "启动 Jetson 只读从臂状态/动作桥…"
-  nohup bash "$root/scripts/start_jetson_follower_record_bridge.sh" >"$runtime/record-bridge.log" 2>&1 & echo $! >"$runtime/record-bridge.pid"
+  nohup bash "$root/scripts/start_jetson_follower_record_bridge.sh" >"$runtime/record-bridge.log" 2>&1 < /dev/null 9>&- & echo $! >"$runtime/record-bridge.pid"
 fi
 for n in $(seq 1 30); do
   ss -ltn sport = :9000 | grep -q LISTEN && break
@@ -221,11 +264,52 @@ for bridge_pid in $bridge_pids; do
   taskset --all-tasks --pid --cpu-list 3-7 "$bridge_pid" >/dev/null 2>&1 || true
   renice -n 2 -p "$bridge_pid" >/dev/null 2>&1 || true
 done
+stage="等待相机采集接口"
 for n in $(seq 1 20); do
   test -S /tmp/openarm_rgbd_raw.ipc && break
   sleep 1
 done
-test -S /tmp/openarm_rgbd_raw.ipc'
+if ! test -S /tmp/openarm_rgbd_raw.ipc; then
+  echo "ERROR: Jetson 相机服务未就绪：20 秒内未创建采集 IPC。相机日志如下：" >&2
+  tail -40 "$runtime/camera-service.log" >&2 || true
+  exit 1
+fi
+stage="核验录制服务与三路相机健康状态"
+/home/nvidia/miniconda3/envs/lerobot/bin/python - <<PY
+import json, time, zmq
+context = zmq.Context()
+deadline = time.monotonic() + 20
+reason = "录制服务尚未响应"
+try:
+    while time.monotonic() < deadline:
+        client = context.socket(zmq.REQ)
+        client.setsockopt(zmq.LINGER, 0)
+        client.setsockopt(zmq.SNDTIMEO, 1000)
+        client.setsockopt(zmq.RCVTIMEO, 1000)
+        try:
+            client.connect("tcp://127.0.0.1:5557")
+            client.send_json({"command": "status"})
+            result = client.recv_json()
+            if not isinstance(result, dict):
+                reason = "录制服务返回了无效状态"
+            elif result.get("ok") is not True:
+                reason = "录制服务未就绪：" + str(result.get("error"))
+            else:
+                health = result.get("camera_health")
+                if isinstance(health, dict) and health.get("ok") is True:
+                    print("✓ Jetson 录制服务可响应，三路相机健康检查通过")
+                    break
+                reason = "相机健康检查未通过：" + json.dumps(health, ensure_ascii=False)
+        except (zmq.ZMQError, ValueError) as exc:
+            reason = "录制服务状态查询失败：" + str(exc)
+        finally:
+            client.close(0)
+        time.sleep(0.5)
+    else:
+        raise SystemExit("ERROR: " + reason)
+finally:
+    context.term()
+PY'
 }
 
 stop_recording_on_exit() {

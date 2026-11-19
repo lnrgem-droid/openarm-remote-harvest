@@ -5,12 +5,14 @@
 # Jetson: followers, can1 (right) + can2 (left)
 #
 # This script deliberately never bypasses the follower watchdog's ALIGNING gate.
-# Both stacks first reproduce the upstream openarm_teleop INITIAL_POSITION
-# (J4=pi/5, all other arm joints=0); after that, ALIGN and RUN are requested
+# Both stacks first move to the standard natural hanging pose (J1-J7=0);
+# after that, ALIGN and RUN are requested
 # only if the watchdog accepts it.
 # ROS Humble setup scripts themselves read optional variables that may be unset.
 # Enable nounset only after sourcing them.
 set -eo pipefail
+STARTUP_STARTED_SECONDS=$SECONDS
+STAGE_STARTED_SECONDS=$SECONDS
 
 ssh() { command ssh -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"; }
 
@@ -24,6 +26,11 @@ FOLLOWER_LEFT_CAN="${FOLLOWER_LEFT_CAN:-can2}"
 FORCE_FEEDBACK="${FORCE_FEEDBACK:-true}"
 LOG_DIR="${LOG_DIR:-/tmp/openarm-remote-teleop}"
 JETSON_CONTROL_CPUSET="${JETSON_CONTROL_CPUSET:-0-2}"
+NETWORK_ACTION_TIMEOUT_MS="${OPENARM_NETWORK_ACTION_TIMEOUT_MS:-300}"
+case "$NETWORK_ACTION_TIMEOUT_MS" in
+  150|300) ;;
+  *) echo 'ERROR: OPENARM_NETWORK_ACTION_TIMEOUT_MS must be 150 or 300' >&2; exit 64 ;;
+esac
 # Default selected after supervised homing + alignment + saved-pose return
 # acceptance on 2026-09-20. Keep the old install intact for explicit rollback.
 TRACKING_CANDIDATE="${TRACKING_CANDIDATE:-true}"
@@ -62,7 +69,13 @@ set -u
 remote_control() {
   local command="$1"
   case "$command" in status|align|run|hold|reset|disable) ;; *) return 64 ;; esac
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control $command"
+  # Status is read-only and uses the same runtime socket as the ROS CLI.
+  # Motion transitions retain the established CLI and are never retried here.
+  if [[ "$command" == status ]]; then
+    /usr/bin/python3 "$ROOT_DIR/scripts/read_remote_teleop_status.py" --peer "$JETSON_HOST"
+  else
+    ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && ros2 run remote_teleop_runtime remote-teleop-control $command"
+  fi
 }
 
 status_is_healthy_running() {
@@ -92,6 +105,8 @@ verify_alignment() {
 
 show_stage() {
   local number="$1" title="$2" motion="$3" control="$4" action="$5"
+  printf '\n  上一阶段耗时：%s 秒；启动累计：%s 秒\n' "$((SECONDS-STAGE_STARTED_SECONDS))" "$((SECONDS-STARTUP_STARTED_SECONDS))"
+  STAGE_STARTED_SECONDS=$SECONDS
   printf '\n[%s/6] %s\n' "$number" "$title"
   printf '  机械臂可能运动：%s\n' "$motion"
   printf '  现在可以遥操：%s\n' "$control"
@@ -139,25 +154,28 @@ repair_jetson_python_runtime() {
 verify_runtime_builds() {
   # A successful build does not prove the service environment can load it
   # (e.g. accidental Conda yaml-cpp linkage). Check before touching motors.
-  local host_dependencies remote_dependencies
+  local host_dependencies remote_check_command
   host_dependencies="$(ldd "$HOST_CONTROL_NODE" 2>&1)" || {
     echo "ERROR: 主机控制器依赖检查失败：$host_dependencies" >&2; return 1;
   }
-  remote_dependencies="$(ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash' && source '$JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash' && ldd '$JETSON_CONTROL_NODE'" 2>&1)" || {
-    echo "ERROR: Jetson 控制器依赖检查失败：$remote_dependencies" >&2; return 1;
-  }
-  if grep -q 'not found' <<<"$host_dependencies$remote_dependencies"; then
-    echo 'ERROR: 控制器缺少动态库，尚未开始归位：' >&2
-    printf '%s\n%s\n' "$host_dependencies" "$remote_dependencies" >&2
+  if grep -q 'not found' <<<"$host_dependencies"; then
+    echo "ERROR: 主机控制器缺少动态库，尚未开始归位：$host_dependencies" >&2
     return 1
   fi
+  # Bash-quote each argument; the program is streamed over stdin rather than
+  # installed into or cached on the peer. Revalidate on every startup.
+  printf -v remote_check_command '%q ' bash -s -- "$JETSON_ROOT" "$CONTROL_OVERLAY" \
+    "$TRACKING_CANDIDATE" "$JETSON_CONTROL_CPUSET" "$NETWORK_ACTION_TIMEOUT_MS"
+  ssh "$JETSON_HOST" "$remote_check_command" <"$ROOT_DIR/scripts/check_remote_startup_build.sh" || {
+    echo 'ERROR: Jetson 控制构建检查失败，尚未开始归位。' >&2
+    return 1
+  }
   if [[ "$GRIPPER_CONTACT_FEEDBACK" == true ]]; then
     strings "$HOST_CONTROL_NODE" | grep -F 'Gripper contact reflection' >/dev/null || return 1
     /usr/bin/python3 -c 'from remote_teleop_runtime.common import gripper_contact_reference' || return 1
   fi
   if [[ "$TRACKING_CANDIDATE" == true ]]; then
     strings "$HOST_CONTROL_NODE" | grep -F 'bounded tracking assist' >/dev/null || return 1
-    ssh "$JETSON_HOST" "strings '$JETSON_CONTROL_NODE' | grep -F 'bounded tracking assist' >/dev/null" || return 1
   fi
   /usr/bin/python3 -c 'from remote_teleop_runtime.collection_motion import CollectionMotion; from remote_teleop_protocol import FollowerState; assert hasattr(FollowerState, "leader_return_target")' || {
     echo 'ERROR: 主机遥操 Python 包未更新，请重新构建 remote_teleop_protocol 和 remote_teleop_runtime。' >&2
@@ -171,6 +189,15 @@ verify_runtime_builds() {
     echo 'ERROR: 主机控制器缺少左主臂自动对齐接口；尚未开始归位，请更新控制构建。' >&2
     return 1
   fi
+  /usr/bin/python3 - <<'PYHOME' || return 1
+import os, yaml
+from ament_index_python.packages import get_package_share_directory
+from remote_teleop_runtime.collection_motion import COMMANDS
+assert {"left_home", "right_home", "left_home_stop", "right_home_stop"}.issubset(COMMANDS)
+share = get_package_share_directory("remote_teleop_runtime")
+with open(os.path.join(share, "config", "bimanual_leader.yaml")) as f:
+    assert yaml.safe_load(f)["/**"]["ros__parameters"]["startup_home_target"] == [0.]*7, "主臂启动目标必须为全零"
+PYHOME
   # Both running Python overlays must understand the independent left/right
   # servo acknowledgements before any homing or motor startup is attempted.
   local left_master_check
@@ -179,10 +206,7 @@ verify_runtime_builds() {
     echo 'ERROR: 主机实际 Python overlay 缺少双端保持协议；请更新 remote_teleop_protocol/runtime。尚未开始归位。' >&2
     return 1
   }
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash' && source '$JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash' && /usr/bin/python3 -c '$left_master_check'" || {
-    echo 'ERROR: 从臂主机实际 Python overlay 缺少双端保持协议；请更新 remote_teleop_protocol/runtime。尚未开始归位。' >&2
-    return 1
-  }
+
   # The dedicated I/O worker requires correlated watchdog replies. Check the
   # effective overlays together before a restart can begin motor homing.
   local follower_io_check
@@ -191,20 +215,9 @@ verify_runtime_builds() {
     echo 'ERROR: 主机通信与 watchdog 修复版本不一致；尚未开始归位。' >&2
     return 1
   }
-  ssh "$JETSON_HOST" "source /opt/ros/humble/setup.bash && source '$JETSON_ROOT/ros2_robot/install/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_bimanual/setup.bash' && source '$JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash' && source '$JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash' && /usr/bin/python3 -c '$follower_io_check'" || {
-    echo 'ERROR: Jetson 通信与 watchdog 修复版本不一致；尚未开始归位。' >&2
-    return 1
-  }
+
   if [[ ! -x "$HOST_CONTROL_NODE" ]] || ! strings "$HOST_CONTROL_NODE" | grep -F "$HOME_MARKER" >/dev/null; then
     echo "ERROR: 主机 install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先重新编译。" >&2
-    return 1
-  fi
-  if ! ssh "$JETSON_HOST" "test -x '$JETSON_CONTROL_NODE' && strings '$JETSON_CONTROL_NODE' | grep -F '$HOME_MARKER' >/dev/null"; then
-    echo "ERROR: Jetson install_bimanual 不是当前 INITIAL_POSITION 复位版本，请先同步并编译。" >&2
-    return 1
-  fi
-  if ! ssh "$JETSON_HOST" "taskset --cpu-list '$JETSON_CONTROL_CPUSET' true"; then
-    echo "ERROR: Jetson cannot reserve control CPUs $JETSON_CONTROL_CPUSET." >&2
     return 1
   fi
   if ! check_jetson_python_runtime; then
@@ -246,6 +259,11 @@ cleanup() {
     wait "$LEADER_PID" 2>/dev/null || true
   fi
 }
+# Also guard terminal/service starts that bypass the GUI. Query only; fail
+# before installing cleanup or touching either existing control stack.
+echo '启动前检查两端电机供电与反馈（不使能、不归位）…'
+/usr/bin/python3 "$ROOT_DIR/scripts/preflight_motor_feedback.py" \
+  --jetson "$JETSON_HOST" --follower-interfaces "$FOLLOWER_RIGHT_CAN" "$FOLLOWER_LEFT_CAN"
 trap cleanup INT TERM EXIT
 
 # Always replace an old control stack. A gravity-PD node can remain alive after
@@ -283,7 +301,8 @@ fi
 show_stage 2 '启动 Jetson 从臂控制，并让左右从臂自动回到初始位' \
   '是；左右从臂会自动运动回初始位' \
   '否' '远离运动范围，不要拖动任何机械臂，随时准备急停'
-ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && source $JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash && source $JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash && exec taskset --cpu-list $JETSON_CONTROL_CPUSET ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true tracking_candidate:=$TRACKING_CANDIDATE right_arm_can:=$FOLLOWER_RIGHT_CAN left_arm_can:=$FOLLOWER_LEFT_CAN' > /tmp/openarm_bimanual_follower.log 2>&1 &"
+echo "  动作超时锁存阈值：${NETWORK_ACTION_TIMEOUT_MS} ms；100 ms 动作新鲜度保持门限仍生效。"
+ssh "$JETSON_HOST" "nohup bash -lc 'source /opt/ros/humble/setup.bash && source $JETSON_ROOT/ros2_robot/install/setup.bash && source $JETSON_ROOT/ros2_robot/install_bimanual/setup.bash && source $JETSON_ROOT/ros2_robot/install_gripper_candidate/setup.bash && source $JETSON_ROOT/ros2_robot/$CONTROL_OVERLAY/local_setup.bash && exec taskset --cpu-list $JETSON_CONTROL_CPUSET ros2 launch remote_teleop_runtime bimanual_follower.launch.py reaction_verified:=true startup_home:=true tracking_candidate:=$TRACKING_CANDIDATE right_arm_can:=$FOLLOWER_RIGHT_CAN left_arm_can:=$FOLLOWER_LEFT_CAN network_action_timeout_ms:=$NETWORK_ACTION_TIMEOUT_MS' > /tmp/openarm_bimanual_follower.log 2>&1 &"
 
 show_stage 3 '等待左右从臂完成回初始位并进入 ALIGNING' \
   '是；从臂可能仍在缓慢归位' \
@@ -463,6 +482,7 @@ if [[ "$LIVE_READY" != true ]]; then
 fi
 echo
 echo '============================================================'
+printf '启动检查总耗时：%s 秒\n' "$((SECONDS-STARTUP_STARTED_SECONDS))"
 echo '启动完成：状态 RUNNING，左右主从臂已建立一一对应跟随。'
 echo '  机械臂可能运动：是；从臂会跟随主臂，力反馈也已启用'
 echo '  现在可以遥操：是'

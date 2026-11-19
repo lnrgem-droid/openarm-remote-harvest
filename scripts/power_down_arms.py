@@ -185,7 +185,115 @@ class PassiveListener:
             sock.close()
 
 
-def disable_worker(side, interfaces=None):
+def stopped_leader_identity(interfaces):
+    """Fail closed unless the known leader adapter has no controller owner."""
+    if list(interfaces) != ['can0', 'can1']:
+        raise ShutdownError('主臂查询接口与配置不一致')
+    service = ('openarm-host-test-teleop.service'
+               if os.environ.get('OPENARM_TELEOP_PROFILE') == 'host-test'
+               else 'openarm-remote-teleop.service')
+    output = subprocess.run(['systemctl', '--user', 'show', service,
+        '-p', 'LoadState', '-p', 'ActiveState', '-p', 'MainPID', '-p', 'ControlGroup',
+        '-p', 'InvocationID'], check=True, text=True, capture_output=True, timeout=3).stdout
+    unit = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+    if (unit.get('LoadState') != 'loaded' or not unit.get('InvocationID')
+            or not service_stopped(output)):
+        raise ShutdownError('主臂控制未确认退出，不能使用只读失能核验')
+    for proc in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            args = proc.read_bytes().decode().split('\0')
+        except FileNotFoundError:
+            continue
+        if any(Path(arg).name in {'openarm_gravity_pd_node', 'remote-teleop-leader',
+                                  'bimanual_leader.launch.py'} for arg in args):
+            raise ShutdownError('仍存在主臂控制进程，不能使用只读失能核验')
+    adapters = []
+    for bus in interfaces:
+        usb = (Path('/sys/class/net') / bus / 'device').resolve().parent
+        if ((usb / 'idVendor').read_text().strip() != '0c72'
+                or (usb / 'idProduct').read_text().strip() != '0011'):
+            raise ShutdownError('主臂 CAN 盒身份不符')
+        link = json.loads(subprocess.run(['ip', '-j', '-d', 'link', 'show', bus],
+            check=True, capture_output=True, text=True, timeout=3).stdout)[0]
+        data = link['linkinfo']['info_data']
+        if ('UP' not in link['flags'] or data['state'] != 'ERROR-ACTIVE'
+                or 'FD' not in data['ctrlmode'] or data['bittiming']['bitrate'] != 1000000
+                or data['data_bittiming']['bitrate'] != 5000000):
+            raise ShutdownError('主臂 CAN 尚未就绪')
+        adapters.append((bus, str(usb), link['ifindex']))
+    return unit, adapters
+
+
+def query_disabled_leader(interfaces):
+    """Only DM refresh (0xCC), never enable/disable, motion or parameter writes.
+
+    Each of the 16 motors must answer three separate refresh queries with state
+    zero. Missing, stale, enabled or fault feedback cannot substitute for proof.
+    """
+    from check_motor_enable import SO_TIMESTAMPNS, decode_feedback, feedback_receive_time
+    identity = stopped_leader_identity(interfaces)
+    motors = {}
+    for bus in interfaces:
+        with socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as sock:
+            sock.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_FD_FRAMES, 1)
+            sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
+            sock.setsockopt(socket.SOL_CAN_RAW, socket.CAN_RAW_FILTER,
+                b''.join(struct.pack('=II', i, 0xC00007FF) for i in range(0x11, 0x19)))
+            sock.setsockopt(socket.SOL_CAN_RAW, 2, struct.pack('=I', 0x1fffffff))
+            sock.bind((bus,)); sock.setblocking(False)
+            for _ in range(3):
+                for motor in range(1, 9):
+                    sent = time.monotonic()
+                    sock.send(struct.pack('=IBBBB64s', 0x7ff, 8, 1, 0, 0,
+                                         bytes([motor, 0, 0xcc, 0, 0, 0, 0, 0])))
+                    deadline = sent + .05
+                    answered = False
+                    while time.monotonic() < deadline:
+                        if not select.select([sock], [], [], max(0., deadline-time.monotonic()))[0]:
+                            break
+                        packet, ancillary, flags, _ = sock.recvmsg(72, socket.CMSG_SPACE(16))
+                        if struct.unpack_from('=I', packet)[0] & 0x20000000:
+                            raise ShutdownError('主臂查询出现 CAN 错误，停止核验')
+                        received = feedback_receive_time(ancillary, flags, time.time_ns(), time.monotonic())
+                        decoded = decode_feedback(packet) if received is not None and received >= sent else None
+                        if decoded is None:
+                            continue
+                        if decoded[1] != 0:
+                            raise ShutdownError(f'{bus}/{decoded[0]} 未失能，不能跳过主臂失能服务')
+                        if decoded[0] == motor:
+                            item = motors.setdefault(f'{bus}/{motor}', {'states': [], 'disabled': False})
+                            item['states'].append(0)
+                            item['disabled'] = item['states'] == [0, 0, 0]
+                            answered = True
+                            break
+                    if not answered:
+                        raise ShutdownError(f'{bus}/{motor} 缺少本次查询反馈，未确认失能')
+    if stopped_leader_identity(interfaces) != identity:
+        raise ShutdownError('主臂查询期间控制会话或 CAN 设备改变')
+    return {'verified': len(motors) == 16 and all(v['disabled'] for v in motors.values()),
+            'motors': motors, 'verification_method': 'stopped_leader_refresh'}
+
+
+def verify_stopped_leader_worker(interfaces, authorization_timeout=12.):
+    """Two-phase stop participant for an already-disabled, exited leader."""
+    identity = stopped_leader_identity(interfaces)
+    first = query_disabled_leader(interfaces)
+    if first.get('verified') is not True:
+        raise ShutdownError('主臂失能反馈不完整')
+    emit({'event': 'armed', 'side': 'host', 'verification_method': 'stopped_leader_refresh'})
+    if not select.select([sys.stdin], [], [], authorization_timeout)[0] or sys.stdin.readline().strip() != 'disable':
+        raise ShutdownError('未收到本次失能核验许可')
+    if stopped_leader_identity(interfaces) != identity:
+        raise ShutdownError('等待期间主臂控制会话改变')
+    report = query_disabled_leader(interfaces)
+    if stopped_leader_identity(interfaces) != identity or report.get('verified') is not True:
+        raise ShutdownError('主臂失能复核未通过')
+    # Acknowledges this verification operation, not a nonexistent ROS call.
+    emit({'event': 'device_result', 'side': 'host', **report,
+          'acknowledged': True, 'ok': True, 'error': None})
+
+
+def disable_worker(side, interfaces=None, authorization_timeout=12.):
     """Runs with ROS environment on the machine owning these CAN interfaces."""
     import rclpy
     from std_srvs.srv import Trigger
@@ -198,10 +306,15 @@ def disable_worker(side, interfaces=None):
         node = rclpy.create_node("operator_power_down_" + side)
         client = node.create_client(Trigger, service)
         if not client.wait_for_service(timeout_sec=4.):
-            raise ShutdownError("电机失能服务不可用：" + service)
+            if side == 'host':
+                verify_stopped_leader_worker(interfaces, authorization_timeout)
+                return
+            raise ShutdownError("电机失能服务不可用：" + service +
+                "。若启动失败后控制进程已退出，请支撑四臂、关闭两端机械臂电源，"
+                "再使用“断电后清理遥操故障…”；不要直接重复启动")
         listener = PassiveListener(interfaces)
         emit({"event": "armed", "side": side})
-        if not select.select([sys.stdin], [], [], 12.)[0] or sys.stdin.readline().strip() != "disable":
+        if not select.select([sys.stdin], [], [], authorization_timeout)[0] or sys.stdin.readline().strip() != "disable":
             raise ShutdownError("未收到本次下电许可，未调用失能服务")
         listener.evidence.begin(time.monotonic())
         future = client.call_async(Trigger.Request())
@@ -228,7 +341,7 @@ def disable_worker(side, interfaces=None):
 
 
 class DeviceProcess:
-    def __init__(self, side, peer, interfaces=None):
+    def __init__(self, side, peer, interfaces=None, authorization_timeout=12.):
         self.side = side
         self.buffer = b""
         # Stream the exact local implementation, avoiding stale remote files.
@@ -236,7 +349,8 @@ class DeviceProcess:
         payload = ("import types,sys\nm=types.ModuleType('check_motor_enable')\n"
                    + "exec(" + repr(checker) + ",m.__dict__)\nsys.modules[m.__name__]=m\n"
                    + "ns={'__name__':'power_down_worker'}\nexec(" + repr(Path(__file__).read_text())
-                   + ",ns)\nns['disable_worker'](" + repr(side) + ", " + repr(interfaces) + ")\n")
+                   + ",ns)\nns['disable_worker'](" + repr(side) + ", " + repr(interfaces)
+                   + ", " + repr(authorization_timeout) + ")\n")
         # A single JSON line carries code; unbuffered os.read leaves subsequent
         # authorization bytes available to select()/readline() in the worker.
         bootstrap = "import os,json\nb=b''\nwhile not b.endswith(b'\\n'): b+=os.read(0,1)\nexec(json.loads(b))"
@@ -383,12 +497,14 @@ def service_stopped(output):
             and fields.get("MainPID") == "0" and fields.get("ControlGroup") == "")
 
 
-def coordinate(request, hold, make_device, stop, progress=emit, *, capture=None, finish=None):
+def coordinate(request, hold, make_device, stop, progress=emit, *, capture=None, checkpoint=None,
+               finish=None, before_disable=None, verify_reports=None):
     devices = {}
     reports = {}
     stage = "saving"
     messages = {"saving": "保存数据", "holding": "停止跟随", "arming": "准备两端电机反馈监听",
-                "disabling": "主从电机失能", "verifying": "核验结果", "stopping_service": "停止遥操服务"}
+                "disabling": "主从电机失能", "verifying": "核验结果",
+                "checkpoint": "保存32个电机失能回执", "stopping_service": "停止遥操服务"}
     def announce(name):
         progress({"event": "progress", "stage": name, "message": messages[name]})
     try:
@@ -411,6 +527,8 @@ def coordinate(request, hold, make_device, stop, progress=emit, *, capture=None,
                     reports[side] = {"ok": False, "error": str(exc)}
         if not all(item.get("armed") for item in reports.values()):
             raise ShutdownError("两端失能服务和反馈监听未全部就绪，未发送失能命令")
+        if before_disable:
+            before_disable(identity)
         stage = "disabling"; announce(stage)
         for side, device in devices.items():
             try:
@@ -427,8 +545,13 @@ def coordinate(request, hold, make_device, stop, progress=emit, *, capture=None,
                 except Exception as exc:
                     reports[side] = {"ok": False, "error": str(exc)}
                 progress({"event": "device_result", "side": side, **reports[side]})
+        if verify_reports:
+            reports = verify_reports(identity, reports)
         if not all(item.get("ok") is True and item.get("verified") is True for item in reports.values()):
             raise ShutdownError("下电未完全确认，请检查两端结果；不会自动恢复跟随")
+        if checkpoint:
+            stage = "checkpoint"; announce(stage)
+            checkpoint(identity, reports)
         stage = "stopping_service"; announce(stage)
         stop()
         if finish:
@@ -446,6 +569,80 @@ def coordinate(request, hold, make_device, stop, progress=emit, *, capture=None,
                 pass
     progress(result)
     return result
+
+
+def resume_checkpoint(config, inspect_fn, progress=emit):
+    """Finish an explicitly retried stop without requiring silent ROS drives.
+
+    Never sends enable/disable/HOLD, resets faults, or restarts a controller.
+    """
+    from inspect_teleop_recovery import known_power_down_eligible, complete_disable_checkpoint
+    before = inspect_fn(config['peer'])['evidence']
+    receipt = before.get('power_down_receipt') or {}
+    if (receipt.get('schema_version') != 2 or receipt.get('phase') not in ('drives_disabled', 'complete')
+            or not known_power_down_eligible(before, allow_active_checkpoint=True)):
+        return None
+    seal_recording(RecorderClient(f"tcp://{config['peer_ip']}:5557"))
+    again = inspect_fn(config['peer'])['evidence']
+    if (again.get('power_down_receipt') != receipt
+            or not known_power_down_eligible(again, allow_active_checkpoint=True)
+            or again.get('host_unit') != before.get('host_unit')):
+        raise ShutdownError('重试期间会话改变，未继续停止')
+    if again['host_unit'].get('MainPID') != '0':
+        stop_service(config['service'])
+    after = inspect_fn(config['peer'])['evidence']
+    complete_disable_checkpoint(receipt['shutdown_id'], after)
+    result = {'event': 'complete', 'ok': True, 'stage': 'complete', 'devices': receipt['devices'],
+              'message': '已续完停止流程，32个电机失能回执与停止会话已核验。可单独开始遥操。'}
+    progress(result)
+    return result
+
+
+def perform_stop(config, inspect_fn=None, progress=emit):
+    """Caller owns BOTH lifecycle locks and explicit support confirmation."""
+    from inspect_teleop_recovery import (inspect as inspect_recovery,
+                                        save_disable_checkpoint, complete_disable_checkpoint)
+    inspect_fn = inspect_fn or inspect_recovery
+    resumed = resume_checkpoint(config, inspect_fn, progress=progress)
+    if resumed is not None:
+        return resumed
+    from stop_without_gateway import try_stop_without_gateway
+    recovered = try_stop_without_gateway(config, inspect_fn, progress)
+    if recovered is not None:
+        return recovered
+    checkpoint_id = None
+    def capture():
+        evidence = inspect_fn(config['peer'])['evidence']
+        if not evidence.get('ssh_ok') or not evidence.get('host_unit') or not evidence['remote'].get('process_identities'):
+            raise ShutdownError('无法取得两端控制会话身份，未执行失能')
+        return evidence
+    def checkpoint(before, reports):
+        nonlocal checkpoint_id
+        checkpoint_id = save_disable_checkpoint(before, reports)['shutdown_id']
+    def recheck(before):
+        now = capture()
+        def identity(e):
+            return (e.get('host_boot_id'), e.get('host_unit'), e.get('local_control_processes'),
+                    e['remote'].get('boot_id'), e['remote'].get('process_identities'),
+                    (e['remote'].get('status') or {}).get('leader_session_id'))
+        if identity(now) != identity(before):
+            raise ShutdownError('失能期间控制会话改变，未继续停止或启动')
+    def verify(before, reports):
+        # Repeated disable is idempotent and may emit no new passive frames.
+        # Still require acknowledged commands and fresh 0/0/0 from every drive.
+        from stop_without_gateway import verify_disable_reports
+        recheck(before)
+        verified = verify_disable_reports(config, reports)
+        recheck(before)
+        return verified
+    def finish(before, reports):
+        complete_disable_checkpoint(checkpoint_id, capture())
+    return coordinate(RecorderClient(f"tcp://{config['peer_ip']}:5557"),
+        lambda: hold_following(config['peer']),
+        lambda side: DeviceProcess(side, config['peer'], config[side + '_interfaces'], 45.),
+        lambda: stop_service(config['service']), progress=progress,
+        capture=capture, checkpoint=checkpoint, finish=finish,
+        before_disable=recheck, verify_reports=verify)
 
 
 def main():
@@ -477,18 +674,12 @@ def main():
         except BlockingIOError:
             emit({"event": "complete", "ok": False, "message": "已有下电操作正在执行"})
             return 1
-        from inspect_teleop_recovery import inspect as inspect_recovery, save_power_down_receipt
-        def capture():
-            evidence = inspect_recovery(args.jetson)['evidence']
-            if not evidence.get('ssh_ok') or not evidence.get('host_unit') or not evidence['remote'].get('process_identities'):
-                raise ShutdownError('无法取得两端控制会话身份，未执行下电')
-            return evidence
-        def finish(before, reports):
-            save_power_down_receipt(before, capture(), reports)
-        result = coordinate(RecorderClient(args.recorder), lambda: hold_following(args.jetson),
-                            lambda side: DeviceProcess(side, args.jetson, config[side + "_interfaces"]),
-                            lambda: stop_service(config["service"]),
-                            capture=capture, finish=finish)
+        try:
+            result = perform_stop(config)
+        except Exception as exc:
+            emit({'event': 'complete', 'ok': False, 'stage': 'stopping_service',
+                  'message': '停止流程续做未完成：' + str(exc) + '；已保存的失能证据保留，不会自动使能。'})
+            return 1
         return 0 if result["ok"] else 1
 
 

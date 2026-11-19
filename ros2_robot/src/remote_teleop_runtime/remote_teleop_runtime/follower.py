@@ -17,6 +17,8 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 from .collection_motion import CollectionMotion, COMMANDS
 from .follower_io import FollowerIOWorker
+from .left_only_support import (LEFT_ACTION_PORT, LEFT_STATE_PORT, LEFT_RUNTIME_SOCKET,
+                                LEFT_WATCHDOG_SOCKET, PassiveMotorHealth)
 
 from remote_teleop_follower_safety.local_protocol import encode_heartbeat
 from remote_teleop_follower_safety.watchdog import ControllerHeartbeat
@@ -44,18 +46,25 @@ def bounded_tracking_target(actual, requested):
 
 
 class FollowerGateway(Node):
-    def __init__(self, enable_left: bool, rate: float):
+    def __init__(self, enable_left: bool, rate: float, *, left_only=False, health_bus=None):
         super().__init__("remote_teleop_follower")
+        if left_only and (not enable_left or not health_bus):
+            raise ValueError("left-only requires left feedback and a health CAN bus")
+        self.left_only = left_only
+        self.motor_health = PassiveMotorHealth(health_bus) if left_only else None
+        self.runtime_socket = LEFT_RUNTIME_SOCKET if left_only else RUNTIME_SOCKET
+        self.watchdog_socket = LEFT_WATCHDOG_SOCKET if left_only else WATCHDOG_SOCKET
+        self.state_port = LEFT_STATE_PORT if left_only else STATE_PORT
         self.session = secrets.randbits(64) or 1
         self.sequence = self.hb_sequence = 0
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp.bind(("0.0.0.0", ACTION_PORT)); self.udp.setblocking(False)
+        self.udp.bind(("0.0.0.0", LEFT_ACTION_PORT if left_only else ACTION_PORT)); self.udp.setblocking(False)
         self.command = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        if os.path.exists(RUNTIME_SOCKET): os.unlink(RUNTIME_SOCKET)
-        self.command.bind(RUNTIME_SOCKET); os.chmod(RUNTIME_SOCKET, 0o600); self.command.setblocking(False)
-        self.watchdog = UnixDatagramClient(WATCHDOG_SOCKET)
+        if os.path.exists(self.runtime_socket): os.unlink(self.runtime_socket)
+        self.command.bind(self.runtime_socket); os.chmod(self.runtime_socket, 0o600); self.command.setblocking(False)
+        self.watchdog = UnixDatagramClient(self.watchdog_socket)
         self.enable_left = enable_left
-        self.right_publisher = self.create_publisher(JointState, FOLLOWER_RIGHT_COMMAND_TOPIC, 1)
+        self.right_publisher = None if left_only else self.create_publisher(JointState, FOLLOWER_RIGHT_COMMAND_TOPIC, 1)
         self.left_publisher = (self.create_publisher(JointState, FOLLOWER_LEFT_COMMAND_TOPIC, 1)
                                if enable_left else None)
         self.create_subscription(JointState, FOLLOWER_JOINT_STATES_TOPIC, self.on_joint_state, 1)
@@ -96,21 +105,35 @@ class FollowerGateway(Node):
         # an unbounded socket drain. Their watchdog replies use separate sockets.
         self.create_timer(max(.01, 1.0 / rate), self.command_tick)
         self.io.start()
-        arms = "right + left" if enable_left else "right only"
+        arms = "left only" if left_only else ("right + left" if enable_left else "right only")
         self.get_logger().info(
-            f"{arms} follower listening UDP :{ACTION_PORT} at {rate:.0f} Hz")
+            f"{arms} follower listening UDP :{LEFT_ACTION_PORT if left_only else ACTION_PORT} at {rate:.0f} Hz")
 
     @property
     def have_feedback(self):
-        return self.have_right_feedback and self.have_left_feedback
+        return (getattr(self, "left_only", False) or self.have_right_feedback) and self.have_left_feedback
 
     def on_joint_state(self, msg: JointState):
         values = dict(zip(msg.name, msg.position)); velocities = dict(zip(msg.name, msg.velocity))
         efforts = dict(zip(msg.name, msg.effort))
         now = time.monotonic_ns()
         with self.lock:
+            if getattr(self, "left_only", False):
+                names = [f"openarm_left_joint{i}" for i in range(1, 8)] + ["openarm_left_finger_joint1"]
+                try:
+                    q = [float(values[n]) for n in names]
+                    v = [float(velocities.get(n, 0.)) for n in names]
+                    t = [float(efforts.get(n, 0.)) for n in names]
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    return
+                if not all(math.isfinite(x) for x in q + v + t): return
+                q[7] = max(0., min(1., q[7] / GRIPPER_OPEN_M)) * GRIPPER_MAX_RAD
+                self.positions[:8], self.velocities[:8], self.efforts[:8] = q, v, t
+                self.have_left_feedback = True
+                self.last_left_feedback_ns = self.last_feedback_ns = now
+                return
             right_names = [f"openarm_right_joint{i}" for i in range(1, 8)]
-            if all(n in values for n in right_names):
+            if not getattr(self, "left_only", False) and all(n in values for n in right_names):
                 self.positions[8:15] = [float(values[n]) for n in right_names]
                 self.velocities[8:15] = [float(velocities.get(n, 0.0)) for n in right_names]
                 self.efforts[8:15] = [float(efforts.get(n, 0.0)) for n in right_names]
@@ -131,7 +154,8 @@ class FollowerGateway(Node):
                     self.have_left_feedback = True
                     self.last_left_feedback_ns = now
             if self.have_feedback:
-                self.last_feedback_ns = min(self.last_right_feedback_ns, self.last_left_feedback_ns) if self.enable_left else self.last_right_feedback_ns
+                self.last_feedback_ns = (self.last_left_feedback_ns if getattr(self, "left_only", False) else
+                    min(self.last_right_feedback_ns, self.last_left_feedback_ns) if self.enable_left else self.last_right_feedback_ns)
 
     def heartbeat(self, now_ns):
         """Consume I/O evidence; this ROS callback never sends a heartbeat."""
@@ -154,7 +178,7 @@ class FollowerGateway(Node):
         reply = None
         client = None
         try:
-            client = UnixDatagramClient(WATCHDOG_SOCKET)
+            client = UnixDatagramClient(getattr(self, "watchdog_socket", WATCHDOG_SOCKET))
             reply = safety_command(client, command, **fields)
         finally:
             if client is not None:
@@ -185,7 +209,7 @@ class FollowerGateway(Node):
         # rather than relatch the follower again after it has sagged.
         applied = finite_snapshot(getattr(self, "applied_axes", None), 16)
         for side, start in (("right", 8), ("left", 0)):
-            if side == "left" and not self.enable_left:
+            if (side == "right" and getattr(self, "left_only", False)) or (side == "left" and not self.enable_left):
                 continue
             reference = applied[start:start + 8] if applied is not None else None
             if reference is None:
@@ -206,7 +230,7 @@ class FollowerGateway(Node):
 
     def publish_target(self, now_ns):
         if not self.have_feedback: return False
-        if self.hold_right is None or (self.enable_left and self.hold_left is None):
+        if (not getattr(self, "left_only", False) and self.hold_right is None) or (self.enable_left and self.hold_left is None):
             self.capture_hold_reference()
         feedback_fresh = now_ns - self.last_feedback_ns < FEEDBACK_CONTROL_TIMEOUT_NS
         running = (
@@ -214,6 +238,7 @@ class FollowerGateway(Node):
             and not self.safety.get("fault_bits", 0)
             and now_ns - self.safety_rx_ns < 100_000_000
             and feedback_fresh
+            and (getattr(self, "motor_health", None) is None or self.motor_health.healthy())
         )
         fresh = self.latest_action is not None and now_ns - self.last_action_rx_ns <= 100_000_000
         if self.command_was_running and (not running or not fresh):
@@ -221,35 +246,39 @@ class FollowerGateway(Node):
         if not (running and fresh):
             self.collection.interrupt(self.positions, "控制许可或反馈中断")
         self.command_was_running = running and fresh
-        right_desired = list(self.hold_right); right_gripper_rad = self.hold_right_gripper
+        right_desired = [0.] * 7 if getattr(self, "left_only", False) else list(self.hold_right)
+        right_gripper_rad = 0. if getattr(self, "left_only", False) else self.hold_right_gripper
         left_desired = (list(self.hold_left) if self.enable_left else list(self.positions[0:7]))
         left_gripper_rad = self.hold_left_gripper if self.enable_left else self.positions[7]
-        if running and fresh and self.run_leader_right is not None:
+        if running and fresh and self.run_reference_ready():
             remote = self.latest_action
             requested = list(remote.right_arm)
             # Bound the target around the *current measured follower pose*.
             # Bounding around the latched startup hold pose would incorrectly
             # restrict the arm to a permanent +/-0.20 rad travel window.
-            right_desired = bounded_tracking_target(self.positions[8:15], requested)
+            if not getattr(self, "left_only", False):
+                right_desired = bounded_tracking_target(self.positions[8:15], requested)
             # A gripper command is an opening fraction, not a shared arm pose.
             # Use the leader's absolute opening so a closed leader always
             # closes the follower even if their initial finger openings differ.
-            right_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.right_gripper))
+            if not getattr(self, "left_only", False):
+                right_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.right_gripper))
             if self.enable_left and self.run_leader_left is not None:
                 requested = list(remote.left_arm)
                 left_desired = bounded_tracking_target(self.positions[0:7], requested)
                 left_gripper_rad = max(GRIPPER_MAX_RAD, min(0.0, remote.left_gripper))
-        selected = self.collection.update(
+        selected = (left_desired + [left_gripper_rad] + [0.] * 8 if getattr(self, "left_only", False) else self.collection.update(
             self.positions, left_desired + [left_gripper_rad] + right_desired + [right_gripper_rad],
-            now_ns / 1e9, running and fresh and self.run_leader_right is not None,
+            now_ns / 1e9, running and fresh and self.run_reference_ready(),
             self.latest_action.axes if self.latest_action else None,
-            self.latest_action.collection_ack if self.latest_action else 0)
+            self.latest_action.collection_ack if self.latest_action else 0))
         left_desired, left_gripper_rad = selected[:7], selected[7]
         right_desired, right_gripper_rad = selected[8:15], selected[15]
         right_msg = JointState(); right_msg.header.stamp = self.get_clock().now().to_msg()
         right_msg.name = [f"openarm_right_joint{i}" for i in range(1, 8)] + ["openarm_right_gripper"]
         right_msg.position = right_desired + [max(0.0, min(1.0, right_gripper_rad / GRIPPER_MAX_RAD))]
-        self.right_publisher.publish(right_msg)
+        if not getattr(self, "left_only", False):
+            self.right_publisher.publish(right_msg)
         if self.enable_left:
             left_msg = JointState(); left_msg.header.stamp = self.get_clock().now().to_msg()
             left_msg.name = [f"openarm_left_joint{i}" for i in range(1, 8)] + ["openarm_left_gripper"]
@@ -258,13 +287,17 @@ class FollowerGateway(Node):
         # Commit only after every enabled side has actually been published.
         # A partial/failed publish is not a new complete control cycle.
         self.applied_axes = tuple(selected)
-        self.last_target_right = tuple(right_desired)
+        self.last_target_right = None if getattr(self, "left_only", False) else tuple(right_desired)
         if self.enable_left:
             self.last_target_left = tuple(left_desired)
-        if running and fresh and self.run_leader_right is not None:
+        if running and fresh and self.run_reference_ready():
             self.applied_session = remote.session_id; self.applied_sequence = remote.sequence
             self.action_timestamp_ns = time.monotonic_ns()
         return True
+
+    def run_reference_ready(self):
+        return ((getattr(self, "left_only", False) or self.run_leader_right is not None)
+                and (not self.enable_left or self.run_leader_left is not None))
 
     def capture_run_reference(self):
         """Capture the relative leader/follower pose at the RUNNING boundary.
@@ -277,10 +310,11 @@ class FollowerGateway(Node):
         """
         if not self.latest_action or not self.have_feedback:
             return
-        self.run_leader_right = tuple(self.latest_action.right_arm)
-        self.run_follower_right = tuple(self.positions[8:15])
-        self.run_leader_gripper = self.latest_action.right_gripper
-        self.run_follower_gripper = self.positions[15]
+        if not getattr(self, "left_only", False):
+            self.run_leader_right = tuple(self.latest_action.right_arm)
+            self.run_follower_right = tuple(self.positions[8:15])
+            self.run_leader_gripper = self.latest_action.right_gripper
+            self.run_follower_gripper = self.positions[15]
         if self.enable_left:
             self.run_leader_left = tuple(self.latest_action.left_arm)
             self.run_follower_left = tuple(self.positions[0:7])
@@ -295,8 +329,8 @@ class FollowerGateway(Node):
                 cmd = request.get("command"); response = self.runtime_status()
                 if cmd == "status": pass
                 elif cmd in COMMANDS:
-                    if not self.enable_left:
-                        raise RuntimeError("采集姿态控制需要双臂配置")
+                    if not self.enable_left or getattr(self, "left_only", False):
+                        raise RuntimeError("采集姿态控制需要双臂配置；单左臂模式不接受此命令")
                     healthy = (self.safety.get("state") == "RUNNING"
                         and not self.safety.get("fault_bits", 0)
                         and now_ns-self.safety_rx_ns < 100_000_000
@@ -315,7 +349,7 @@ class FollowerGateway(Node):
                     differences = [
                         (f"right J{index}", float(leader), float(follower))
                         for index, (leader, follower) in enumerate(
-                            zip(self.latest_action.right_arm, self.positions[8:15]), start=1)]
+                            zip(self.latest_action.right_arm, self.positions[8:15]), start=1)] if not getattr(self, "left_only", False) else []
                     if self.enable_left:
                         differences.extend(
                             (f"left J{index}", float(leader), float(follower))
@@ -339,6 +373,8 @@ class FollowerGateway(Node):
                     response = self.watchdog_command("hold")
                     self.clear_run_reference()
                 elif cmd == "reset":
+                    if getattr(self, "left_only", False):
+                        raise RuntimeError("单左臂故障须检查后停止重启；不支持在线清除保护锁存")
                     response = self.watchdog_command("reset", estop_released=True)
                     self.latest_action = None; self.last_action_rx_ns = 0
                     self.clear_run_reference()
@@ -398,6 +434,11 @@ class FollowerGateway(Node):
             response["io_diagnostics"]["command_reply_dropped"] = self.command_reply_dropped
         response["collection"] = self.collection.status(self.positions,
             self.latest_action.axes if self.latest_action else self.positions)
+        if getattr(self, "left_only", False):
+            response["collection"] = {"left_mode": "FOLLOW", "right_mode": "DISABLED",
+                "recording": None, "transitioning_arms": [], "return_phase": "idle"}
+            response["mode"] = "left_only"
+            response["motor_health"] = self.motor_health.report()
         response["applied_axes"] = self.applied_axes
         if self.last_target_right is not None:
             errors = [target - actual for target, actual in zip(
@@ -408,7 +449,8 @@ class FollowerGateway(Node):
             response["max_tracking_error_rad"] = max(abs(error) for error in errors)
         if self.latest_action is not None:
             response["leader_axes"] = list(self.latest_action.axes)
-            response["leader_right_rad"] = list(self.latest_action.right_arm)
+            if not getattr(self, "left_only", False):
+                response["leader_right_rad"] = list(self.latest_action.right_arm)
             if self.enable_left:
                 response["leader_left_rad"] = list(self.latest_action.left_arm)
             response["action_age_ms"] = (time.monotonic_ns() - self.last_action_rx_ns) / 1_000_000
@@ -424,8 +466,8 @@ class FollowerGateway(Node):
             response["left_actual_rad"] = list(self.positions[0:7])
             response["left_tracking_error_rad"] = errors
             response["left_max_tracking_error_rad"] = max(abs(error) for error in errors)
-        response["relative_follow_reference_captured"] = self.run_leader_right is not None and (not self.enable_left or self.run_leader_left is not None)
-        response["enabled_arms"] = ["right", *( ["left"] if self.enable_left else [])]
+        response["relative_follow_reference_captured"] = self.run_reference_ready()
+        response["enabled_arms"] = ["left"] if getattr(self, "left_only", False) else ["right", *( ["left"] if self.enable_left else [])]
         return response
 
     def send_state(self, now_ns):
@@ -439,7 +481,7 @@ class FollowerGateway(Node):
             tuple(self.positions), tuple(self.velocities), tuple(self.efforts), self.collection.flags,
             self.collection.leader_servo_target or (0.,)*8)
         try:
-            self.udp.sendto(encode_state(state), (self.peer_ip, STATE_PORT))
+            self.udp.sendto(encode_state(state), (self.peer_ip, getattr(self, "state_port", STATE_PORT)))
         except BlockingIOError:
             pass  # Drop a congested state datagram; never queue/replay old state.
 
@@ -450,7 +492,7 @@ class FollowerGateway(Node):
     def tick(self):
         now_ns = time.monotonic_ns(); self.heartbeat(now_ns)
         if self.latest_action and self.have_feedback:
-            errors = [abs(a-b) for a,b in zip(self.latest_action.right_arm, self.positions[8:15])]
+            errors = [] if getattr(self, "left_only", False) else [abs(a-b) for a,b in zip(self.latest_action.right_arm, self.positions[8:15])]
             if self.enable_left:
                 errors.extend(abs(a-b) for a,b in zip(self.latest_action.left_arm, self.positions[0:7]))
             aligned = max(errors) <= 0.15
@@ -458,15 +500,23 @@ class FollowerGateway(Node):
             elif not aligned: self.align_since_ns = 0
         # The next watchdog heartbeat after `run` is the authoritative state
         # transition. Capture here as a second, timing-independent safeguard.
-        if self.safety.get("state") == "RUNNING" and self.run_leader_right is None:
+        if self.safety.get("state") == "RUNNING" and not self.run_reference_ready():
             self.capture_run_reference()
         if self.publish_target(time.monotonic_ns()):
-            self.io.control_completed(now_ns, time.monotonic_ns(), self.last_feedback_ns, self.have_feedback)
+            health = getattr(self, "motor_health", None)
+            evidence = health.report() if health is not None else None
+            # Before the first three enabled samples, preserve startup grace;
+            # never claim CAN is healthy, or latch a scheduling-race fault.
+            # A real drive fault or any loss after arming is reported at once.
+            if evidence is None or evidence["armed"] or evidence["fault"]:
+                motor_ok = evidence is None or evidence["healthy"]
+                self.io.control_completed(now_ns, time.monotonic_ns(), self.last_feedback_ns if motor_ok else 0, self.have_feedback)
         self.send_state(time.monotonic_ns())
 
     def close(self):
+        if self.motor_health is not None: self.motor_health.close()
         self.io.close(); self.command.close()
-        if os.path.exists(RUNTIME_SOCKET): os.unlink(RUNTIME_SOCKET)
+        if os.path.exists(self.runtime_socket): os.unlink(self.runtime_socket)
 
 
 def main():
@@ -475,10 +525,15 @@ def main():
                         help="control the left follower arm as well as the default right arm")
     parser.add_argument("--rate", type=float, default=100.0,
                         help="UDP receive / command publish rate in Hz")
+    parser.add_argument("--left-only", action="store_true")
+    parser.add_argument("--health-bus")
     args, ros_args = parser.parse_known_args()
+    if args.left_only and not args.health_bus:
+        parser.error("--left-only requires --health-bus")
     if args.rate <= 0.0:
         parser.error("--rate must be positive")
-    rclpy.init(args=ros_args); node = FollowerGateway(args.enable_left, args.rate)
+    rclpy.init(args=ros_args); node = FollowerGateway(args.enable_left or args.left_only, args.rate,
+        left_only=args.left_only, health_bus=args.health_bus)
     try: rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException): pass
     finally:

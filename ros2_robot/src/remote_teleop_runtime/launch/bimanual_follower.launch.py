@@ -60,6 +60,10 @@ def _launch_actions(context):
     verified = LaunchConfiguration("reaction_verified").perform(context).lower() == "true"
     startup_home = LaunchConfiguration("startup_home").perform(context).lower() == "true"
     watchdog_args = ["--verified-reaction", "position_hold"] if verified else []
+    action_timeout = LaunchConfiguration("network_action_timeout_ms").perform(context)
+    if action_timeout not in ("150", "300"):
+        raise ValueError("network_action_timeout_ms must be 150 or 300")
+    watchdog_args += ["--network-action-timeout-ms", action_timeout]
     # Two arms initialize and home sequentially, so the normal 2 s liveness
     # grace would fault before the controller can send its first heartbeat.
     if startup_home:
@@ -83,6 +87,8 @@ def generate_launch_description():
             description="Opt-in simulation-tested bounded tracking correction"),
         DeclareLaunchArgument("startup_home", default_value="true",
             description="Explicitly move both follower arms to existing encoder q=0 at startup"),
+        DeclareLaunchArgument("network_action_timeout_ms", default_value="150",
+            description="Action fault latch: 150 ms normally, 300 ms for supervised diagnostics; 100 ms motion freshness gate is unchanged"),
         DeclareLaunchArgument("right_arm_can", default_value="can1",
             description="Right follower CAN interface; old desktop test uses can0"),
         DeclareLaunchArgument("left_arm_can", default_value="can2",
